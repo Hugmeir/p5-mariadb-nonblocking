@@ -2,7 +2,7 @@ use v5.18.1;
 use warnings;
 
 use blib;
-use MariaDB::NonBlocking;
+use MariaDB::NonBlocking ':all';
 
 use EV;
 use AnyEvent;
@@ -14,27 +14,25 @@ sub _decide_what_watchers_we_need {
     my ($status) = @_;
 
     my $wait_on = 0;
-    $wait_on |= EV::READ  if $status & MariaDB::NonBlocking::MYSQL_WAIT_READ;
-    $wait_on |= EV::WRITE if $status & MariaDB::NonBlocking::MYSQL_WAIT_WRITE;
+    $wait_on |= EV::READ  if $status & MYSQL_WAIT_READ;
+    $wait_on |= EV::WRITE if $status & MYSQL_WAIT_WRITE;
 
     return $wait_on;
 }
 
 sub ev_event_to_mysql_event {
-    return MariaDB::NonBlocking::MYSQL_WAIT_TIMEOUT
+    return MYSQL_WAIT_TIMEOUT
         if $_[0] & EV::TIMER;
 
     my $events = 0;
-    $events |= MariaDB::NonBlocking::MYSQL_WAIT_READ  if $_[0] & EV::READ;
-    $events |= MariaDB::NonBlocking::MYSQL_WAIT_WRITE if $_[0] & EV::WRITE;
+    $events |= MYSQL_WAIT_READ  if $_[0] & EV::READ;
+    $events |= MYSQL_WAIT_WRITE if $_[0] & EV::WRITE;
 
     return $events;
 }
 
 sub run_queries_promise {
     my @queries  = @_;
-    my $deferred = deferred;
-    my $promise  = $deferred->promise;
 
     my @connections = map MariaDB::NonBlocking->connect(
                           {
@@ -47,19 +45,14 @@ sub run_queries_promise {
                           }
                       ), 1..3;
 
-    my (@query_results, @errors); # array of arrayrefs
-    my $cv = AnyEvent->condvar;
-    $cv->begin(sub {
-        if ( @errors ) {
-            $deferred->reject(@errors);
-        }
-        else {
-            $deferred->resolve(@query_results)
-        }
-    });
+    my @promises;
+    my (@query_results, @errors);
     foreach my $maria ( @connections ) {
         last if !@queries; # Huh.
-        $cv->begin; # Increase the counter in the condvar
+
+        my $deferred = deferred;
+        my $promise  = $deferred->promise;
+        push @promises, $promise;
 
         # We need to either wait for reads or writes.  Currently assuming
         # all wait are going to be for reading
@@ -127,7 +120,12 @@ sub run_queries_promise {
             # so decrease the condvar counter
             if ( !$wait_for || @errors ) {
                 undef %watchers; # BOI!!
-                $cv->end;
+                if ( @errors ) {
+                    $deferred->reject(@errors);
+                }
+                else {
+                    $deferred->resolve();
+                }
             }
             else {
                 my $new_ev_mask = _decide_what_watchers_we_need($wait_for);
@@ -139,7 +137,6 @@ sub run_queries_promise {
                     # become writeable (or both) instead.
                     # This almost never happens.
                     delete $watchers{io};
-                    say "new mask!!";
                     $ev_mask = $new_ev_mask;
                     $watchers{io} = EV::io(
                                         $socket_fd,
@@ -148,17 +145,18 @@ sub run_queries_promise {
                                       );
                 }
 
-                if ( $wait_for & MariaDB::NonBlocking::MYSQL_WAIT_TIMEOUT ) {
-                    my $time_in_seconds = $maria->get_timeout_value_ms() * 1000;
+                if ( $wait_for & MYSQL_WAIT_TIMEOUT ) {
+                    my $timeout_ms = $maria->get_timeout_value_ms();
                     # Bug in the client lib makes the no-timeout case come
                     # back as 0 timeout.  So only create the timer if we
                     # actually have a timeout.
                     # https://lists.launchpad.net/maria-developers/msg09971.html
                     $watchers{timer} = EV::timer(
-                                            $time_in_seconds,
+                                            # EV wants (fractional) seconds
+                                            $timeout_ms/1000,
                                             0, # do not repeat
                                             __SUB__,
-                                       ) if $time_in_seconds;
+                                       ) if $timeout_ms;
                 }
             }
             return;
@@ -167,7 +165,7 @@ sub run_queries_promise {
         my $wait_for = $run_query->();
 
         if ( !$wait_for ) {
-            $cv->end; # Did not have to wait for anything!
+            $deferred->resolve();
             next;
         }
 
@@ -178,8 +176,13 @@ sub run_queries_promise {
             $cb,
         );
     }
-    $cv->end;
-    return $promise;
+    return collect(@promises)->then(
+        sub { # resolve cb, queries were all successful!
+            # Just return the aggregated results
+            return @query_results;
+        },
+        # no reject callback, let the caller deal with errors
+    );
 }
 
 my @queries = (
@@ -194,7 +197,7 @@ say "Going to wait on the promise!";
 $promise->then(
     sub {
         say "Done!";
-        say Dumper([map $_->[0][1], @_]);
+        say Dumper([\@_]);
         $cv->send();
     },
     sub {

@@ -27,7 +27,7 @@ our @EXPORT_OK = qw/
     MYSQL_WAIT_TIMEOUT
 /;
 our %EXPORT_TAGS = (
-    ':all' => [ @EXPORT_OK ]
+    'all' => [ @EXPORT_OK ]
 );
 
 =head1 SYNOPSIS
