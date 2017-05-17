@@ -48,9 +48,9 @@ sub find_file_in {
     foreach my $dir ( @dirs ) {
         my @try_in = (
             $dir,
-            scalar File::Spec->catdir($dir, "mysql"),
-            scalar File::Spec->catdir($dir, "maria"),
+            map scalar File::Spec->catdir($dir, $_), qw/mysql mysqldb maria mariadb/,
         );
+
         for my $path (@try_in) {
 	        my $full_path = File::Spec->catfile($path, $file);
 	        if (-f $full_path) {
