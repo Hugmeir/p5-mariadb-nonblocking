@@ -368,7 +368,10 @@ CODE:
     RETVAL = mysql_get_timeout_value_ms(&(maria->mysql));
 OUTPUT: RETVAL
 
-
+void
+disconnect(MariaDB_client* maria)
+CODE:
+    mysql_close(&(maria->mysql));
 
 
 
