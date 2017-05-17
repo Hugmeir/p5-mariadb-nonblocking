@@ -56,6 +56,7 @@ THX_add_row_to_results(pTHX_ MariaDB_client *maria, MYSQL_ROW row)
 	AV *row_results;
 	int field_count;
     unsigned long *lengths;
+    int i = 0;
 
     query_results = maria->query_results;
 
@@ -64,7 +65,7 @@ THX_add_row_to_results(pTHX_ MariaDB_client *maria, MYSQL_ROW row)
 
 	row_results   = newAV();
 
-    for ( int i = 0; i < field_count; i++ ) {
+    for ( i = 0; i < field_count; i++ ) {
 		SV *col_data = row[i]
 		                ? newSVpvn(row[i], (STRLEN)lengths[i])
 		                : &PL_sv_undef;
@@ -79,13 +80,10 @@ int
 THX_do_stuff(pTHX_ MariaDB_client *maria, IV event)
 #define do_stuff(maria, event) THX_do_stuff(aTHX_ maria, event)
 {
-    bool need_wait = FALSE;
     int err        = 0;
-    char * errstring;
     int status     = 0;
     int state      = maria->current_state;
-
-    int socket_fd  = maria->mysql_socket_fd;
+    const char* errstring;
 
     /* TODO save status */
     do {
@@ -278,6 +276,11 @@ BOOT:
     CV *wait_except_cv  = newCONSTSUB(stash, "MYSQL_WAIT_EXCEPT", newSViv(MYSQL_WAIT_EXCEPT));
 
     CV *wait_timeout_cv = newCONSTSUB(stash, "MYSQL_WAIT_TIMEOUT", newSViv(MYSQL_WAIT_TIMEOUT));
+
+    PERL_UNUSED_VAR(wait_read_cv);
+    PERL_UNUSED_VAR(wait_write_cv);
+    PERL_UNUSED_VAR(wait_except_cv);
+    PERL_UNUSED_VAR(wait_timeout_cv);
 }
 
 MariaDB_client*
