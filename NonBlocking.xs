@@ -27,6 +27,7 @@ typedef struct MariaDB_client {
 
 enum {
     STATE_STANDBY,
+    STATE_CONNECT,
     STATE_QUERY_RUN,
     STATE_ROW_FETCH,
     STATE_FREE_RESULT
@@ -89,21 +90,51 @@ THX_do_stuff(pTHX_ MariaDB_client *maria, IV event)
     do {
         switch ( state ) {
             case STATE_STANDBY:
-                /* How? */
+                if ( maria->query_sv ) {
+                    /* we have a query sv saved, so go ahead and run our query! */
+                    state = STATE_QUERY_RUN;
+                }
+                /* Otherwise, the loop will just end */
+                break;
+            case STATE_CONNECT:
+                if ( maria->is_cont ) {
+                    
+                }
+                else {
+                    
+                }
+
+                err = 1;
+                errstring = "Reconnecting / Async connections are not yet implemented";
+
+                if ( !err && !status ) {
+                    /* connected successfully! */
+                    if ( maria->query_sv ) {
+                        /* need to run a query next */
+                        state = STATE_QUERY_RUN;
+                    }
+                    else {
+                        state = STATE_STANDBY;
+                    }
+                }
                 break;
             case STATE_QUERY_RUN:
                 if ( maria->is_cont ) {
                     status = mysql_real_query_cont(&err, &(maria->mysql), event);
                 }
                 else {
+                    SV* query_sv   = maria->query_sv;
                     STRLEN query_len;
-                    char * query_pv = SvPV(maria->query_sv, query_len);
+                    char* query_pv = SvPV(query_sv, query_len);
                     status = mysql_real_query_start(
                                 &err,
                                 &(maria->mysql),
                                 query_pv,
                                 query_len
                              );
+                    /* Release this */
+                    SvREFCNT_dec(query_sv);
+                    maria->query_sv = NULL;
                 }
 
                 if ( err ) {
@@ -333,13 +364,14 @@ IV
 run_query_start(MariaDB_client* maria, SV * query)
 CODE:
 {
-    if ( maria->current_state != STATE_STANDBY )
+    if ( maria->current_state != STATE_STANDBY && maria->current_state != STATE_CONNECT )
         croak("Cannot call run_query_start because we are in the middle of a query");
-    maria->query_sv      = query; /* yeah, sharing the SV */
-    maria->current_state = STATE_QUERY_RUN; /* TODO do this with checks */
+
+    maria->query_sv = query; /* yeah, sharing the SV */
+    SvREFCNT_inc(query);
+
     prepare_new_result_accumulator();
     RETVAL = do_stuff(maria, 0);
-    maria->query_sv = NULL;  /* ...but only this far! */
 }
 OUTPUT: RETVAL
 
@@ -372,11 +404,14 @@ void
 disconnect(MariaDB_client* maria)
 CODE:
     mysql_close(&(maria->mysql));
-
-
-
-
-
+    maria->is_cont       = FALSE;
+    maria->current_state = STATE_CONNECT;
+    if ( maria->query_sv ) {
+        SvREFCNT_dec(maria->query_sv);
+        maria->query_sv = NULL;
+    }
+    /* TODO leaking memory here, not sure if the result free would block */
+    maria->res     = NULL;
 
 
 int
