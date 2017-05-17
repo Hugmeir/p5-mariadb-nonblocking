@@ -5,7 +5,7 @@
 
 #include <mysql.h>
 
-#define prepare_new_result_accumulator() STMT_START { \
+#define prepare_new_result_accumulator(maria) STMT_START { \
     maria->query_results ? SvREFCNT_dec(maria->query_results) : NULL; \
     maria->query_results = newAV(); \
 } STMT_END
@@ -253,6 +253,36 @@ THX_do_stuff(pTHX_ MariaDB_client *maria, IV event)
     return status;
 }
 
+void
+THX_run_blocking_query(pTHX_ MariaDB_client* maria, SV* query_sv, bool want_results)
+#define run_blocking_query(x,y,z) THX_run_blocking_query(aTHX_ x,y,z)
+{
+    int err = 0;
+    STRLEN query_len;
+    const char* query_pv = SvPV(query_sv, query_len);
+
+    /* TODO check for state == standby */
+
+    err = mysql_real_query( &(maria->mysql), query_pv, query_len );
+
+    if ( err ) {
+        croak("welp!"); /* mysql_errstring */
+    }
+
+    maria->res = mysql_store_result(&(maria->mysql));
+
+    prepare_new_result_accumulator(maria);
+
+    if ( maria->res && want_results ) {
+        MYSQL_ROW row;
+        while ((row = mysql_fetch_row(maria->res)))
+            add_row_to_results(maria, row);
+    }
+
+    mysql_free_result(maria->res);
+    maria->res = NULL;
+}
+
 MariaDB_client*
 mariadb_init(void)
 {
@@ -370,7 +400,7 @@ CODE:
     maria->query_sv = query; /* yeah, sharing the SV */
     SvREFCNT_inc(query);
 
-    prepare_new_result_accumulator();
+    prepare_new_result_accumulator(maria);
     RETVAL = do_stuff(maria, 0);
 }
 OUTPUT: RETVAL
@@ -403,16 +433,43 @@ OUTPUT: RETVAL
 void
 disconnect(MariaDB_client* maria)
 CODE:
-    mysql_close(&(maria->mysql));
-    maria->is_cont       = FALSE;
-    maria->current_state = STATE_CONNECT;
     if ( maria->query_sv ) {
         SvREFCNT_dec(maria->query_sv);
         maria->query_sv = NULL;
     }
-    /* TODO leaking memory here, not sure if the result free would block */
-    maria->res     = NULL;
+    if ( maria->res ) {
+        /* do a best attempt... */
+        int status = mysql_free_result_start(maria->res);
+        if ( status ) {
+            /* Damn.  Would've blocked trying to free the result.  Not much we can do */
+        }
+        maria->res     = NULL;
+    }
+    mysql_close(&(maria->mysql));
+    maria->is_cont       = FALSE;
+    maria->current_state = STATE_CONNECT;
 
+
+
+SV*
+selectall_arrayref(MariaDB_client* maria, SV* query_sv)
+CODE:
+{
+    run_blocking_query(maria, query_sv, TRUE);
+    RETVAL = newRV(MUTABLE_SV(maria->query_results));
+}
+OUTPUT: RETVAL
+
+
+IV
+do(MariaDB_client* maria, SV* query_sv)
+CODE:
+{
+    run_blocking_query(maria, query_sv, FALSE);
+    /* TODO get num_rows and friends */
+    RETVAL = -1;
+}
+OUTPUT: RETVAL
 
 int
 real_query_start(MariaDB_client* maria, SV * query)
@@ -422,7 +479,7 @@ CODE:
     STRLEN query_len;
     char * query_pv = SvPV(query, query_len);
 
-    prepare_new_result_accumulator();
+    prepare_new_result_accumulator(maria);
 
     RETVAL = mysql_real_query_start(&err, &(maria->mysql), query_pv, query_len);
     if ( !RETVAL ) {
