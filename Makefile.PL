@@ -4,8 +4,9 @@ use warnings;
 use ExtUtils::MakeMaker;
 
 use File::Spec;
-use Config   qw/%Config/;
-use IPC::Cmd qw/can_run run/;
+use Config       qw/%Config/;
+use IPC::Cmd     qw/can_run run/;
+use Getopt::Long qw/GetOptions/;
 
 sub get_paths_out_of_config_and_split {
     my @paths;
@@ -28,7 +29,8 @@ sub get_paths_out_of_config_and_split {
                         glibpth
                         glibpath
                     /);
-    sub find_libpath_for { map find_file_in($_, @libpaths), @_ }
+
+    sub find_libpath_for { grep defined, map find_file_in($_, @libpaths), @_ }
 }
 
 {
@@ -39,7 +41,7 @@ sub get_paths_out_of_config_and_split {
                         locincpath
                         usrinc
                     /);
-    sub find_incpath_for { map find_file_in($_, @incpaths), @_ }
+    sub find_incpath_for { grep defined, map find_file_in($_, @incpaths), @_ }
 }
 
 sub find_file_in {
@@ -58,6 +60,8 @@ sub find_file_in {
 	        }
         }
     }
+
+    return;
 }
 
 
@@ -68,38 +72,71 @@ sub run_grab_output {
 
     my $out = @{$stdout_buf // []}[0] // '';
 
+    chomp($out);
+
     return $out;
 }
 
-my ($libs, $inc, $ccflags);
-if ( can_run('mariadb_config') ) {
-    # woo!
-    $libs    = run_grab_output([qw/mariadb_config --libs_r/]);
-    $inc     = run_grab_output([qw/mariadb_config --include/]);
-    $ccflags = run_grab_output([qw/mariadb_config --cflags/]);
-}
+my @wanted_libs = qw( ssl crypto iconv  );
 
-if ( !$ccflags ) {
-    my @needed_libs = qw( mariadbclient ssl crypto iconv );
-    $libs        .= " " . join " ", map "-l$_", @needed_libs;
+GetOptions(
+    'static_link_to_mariadbclient' => \my $statically_link_mariadbclient,
+);
 
-    my @config_entries = qw/dlext lib_ext so/;
-    my @needed_libs_as_paths = map {
-        my $as_lib = "lib$_";
-        my @extensions = map +(/\A\./ ? $_ : ".$_"),
-                                grep +(defined($_) && length($_)),
-                                @Config{@config_entries};
-        map +($as_lib . $_), @extensions
+my ($libs, $inc, $ccflags, $lddlflags) = map $_//'',@Config{qw/libs inc ccflags lddlflags/};
+if ( $statically_link_mariadbclient ) {
+    my @needed_libs = qw( mariadbclient );
+
+    my $ext = $Config{lib_ext};
+    my @libfilenames = map {
+        ( "lib${_}${ext}", "${_}${ext}" )
     } @needed_libs;
 
-    my @libpaths = find_libpath_for(@needed_libs_as_paths);
-    if ( @libpaths ) {
-        $ccflags .= ' ' . join " ", map "-L$_", @libpaths;
-        $libs = $ccflags . ' ' . $libs;
-    }
+    my @libpaths = find_libpath_for(@libfilenames);
 
-    $inc .= ' ' . join " ", find_incpath_for('mysql.h');
+    LIB:
+    foreach my $path (@libpaths) {
+        PATH:
+        foreach my $lib (@libfilenames) {
+            my $file = File::Spec->catfile($path, $lib);
+            next unless -f $file;
+            $lddlflags .= " $file";
+            next LIB;
+        }
+    }
 }
+else {
+    push @wanted_libs, 'mariadbclient';
+    if ( can_run('mariadb_config') ) {
+        # woo!
+        $libs    .= ' ' . run_grab_output([qw/mariadb_config --libs_r/]);
+        $inc     .= ' ' . run_grab_output([qw/mariadb_config --include/]);
+        $ccflags .= ' ' . run_grab_output([qw/mariadb_config --cflags/]);
+    }
+}
+
+LIB:
+foreach my $wanted_lib (@wanted_libs) {
+    my @config_entries = qw/dlext so/;
+
+    my @libs_as_paths = map +( $_, "lib$_" ),
+                        map "${wanted_lib}$_",
+                        map +(/\A\./ ? $_ : ".$_"),
+                        grep +(defined($_) && length($_)),
+                          @Config{@config_entries};
+
+    foreach my $lib ( @libs_as_paths ) {
+        my ($libpath) = find_libpath_for($lib);
+        next unless $libpath;
+
+        $ccflags .= ' -L'.$libpath;
+        $libs    .= ' -l'.$wanted_lib;
+
+        next LIB;
+    }
+}
+
+$inc .= ' ' . join " ", map '-I'.$_, find_incpath_for('mysql.h');
 
 WriteMakefile(
     NAME             => 'MariaDB::NonBlocking',
@@ -121,7 +158,8 @@ WriteMakefile(
     },
     LIBS    => $libs,
     INC     => $inc,
-    CCFLAGS => $ccflags,
+    CCFLAGS   => $ccflags,
+    LDDLFLAGS => $lddlflags,
     dist  => { COMPRESS => 'gzip -9f', SUFFIX => 'gz', },
     clean => { FILES => 'MariaDB-NonBlocking-*' },
 );
