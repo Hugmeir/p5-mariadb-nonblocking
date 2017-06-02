@@ -12,7 +12,7 @@
 
 #define prepare_new_result_accumulator(maria) STMT_START { \
     maria->query_results ? SvREFCNT_dec(maria->query_results) : NULL; \
-    maria->query_results = newAV(); \
+    maria->query_results = MUTABLE_SV(newAV()); \
 } STMT_END
 
 typedef struct sql_config {
@@ -41,7 +41,7 @@ typedef struct MariaDB_client {
 
     sql_config config;
 
-    AV* query_results;
+    SV* query_results;
     SV* query_sv;
 
     /* conveniences */
@@ -70,7 +70,7 @@ typedef struct MariaDB_client {
 } STMT_END
 
 /* Stolen from http://stackoverflow.com/a/37277144 */
-#define NAMES C(DISCONNECTED)C(STANDBY)C(CONNECT)C(QUERY)C(ROW_FETCH)C(FREE_RESULT)
+#define NAMES C(DISCONNECTED)C(STANDBY)C(CONNECT)C(QUERY)C(ROW_FETCH)C(FREE_RESULT)C(PING)
 #define C(x) STATE_##x,
 enum color { NAMES STATE_END };
 #undef C
@@ -147,7 +147,7 @@ THX_add_row_to_results(pTHX_ MariaDB_client *maria, MYSQL_ROW row)
     unsigned long *lengths;
     SSize_t i = 0;
 
-    query_results = maria->query_results;
+    query_results = MUTABLE_SV(maria->query_results);
 
     field_count   = mysql_field_count(&(maria->mysql));
     lengths       = mysql_fetch_lengths(maria->res);
@@ -442,6 +442,30 @@ THX_do_work(pTHX_ SV* self, MariaDB_client* maria, IV event)
                 }
                 break;
             }
+            case STATE_PING:
+            {
+                int ret;
+                if ( maria->is_cont ) {
+                    status = mysql_ping_cont(&ret, &(maria->mysql), event);
+                    event  = 0;
+                }
+                else {
+                    status = mysql_ping_start(&ret, &(maria->mysql));
+                }
+
+                if ( status ) {
+                    maria->is_cont = TRUE;
+                }
+                else {
+                    maria->is_cont = FALSE;
+                    query_results  = newSViv(ret);
+                    state          = STATE_STANDBY;
+                }
+                break;
+            }
+            default:
+                err       = 1;
+                errstring = "Should never happen! Invalid state";
         } /* end of switch (state) */
     }
 
@@ -888,6 +912,54 @@ CODE:
     if ( items > 1 )
         event = SvIV(ST(1));
     RETVAL = do_work(self, maria, event);
+}
+OUTPUT: RETVAL
+
+IV
+ping_start(SV* self)
+CODE:
+{
+    dMARIA;
+
+    RETVAL = 0;
+    if ( maria->current_state == STATE_DISCONNECTED ) {
+        maria->query_results = &PL_sv_true;
+    }
+    else if ( maria->current_state != STATE_STANDBY || maria->is_cont ) {
+        croak("Cannot ping an active connection!!"); /* TODO moar info */
+    }
+    else if ( maria->query_sv ) {
+        croak("Cannot ping when we have a query queued to be run");
+    }
+    else {
+        maria->current_state = STATE_PING;
+        RETVAL = do_work(self, maria, 0);
+    }
+}
+OUTPUT: RETVAL
+
+IV
+ping_cont(SV* self, ...)
+CODE:
+{
+    dMARIA;
+    IV event = 0;
+    if ( items > 1 )
+        event = SvIV(ST(1));
+
+    RETVAL = do_work(self, maria, event);
+}
+OUTPUT: RETVAL
+
+IV
+ping_result(SV* self)
+CODE:
+{
+    dMARIA;
+    if ( maria->is_cont )
+        croak("Cannot get the results of the ping, because we are still waiting on the server to respond!");
+
+    RETVAL = maria->query_results;
 }
 OUTPUT: RETVAL
 
