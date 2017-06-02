@@ -10,6 +10,8 @@ use Promises qw/collect deferred/;
 
 use Data::Dumper;
 
+AnyEvent->condvar; # Initialize
+
 sub _decide_what_watchers_we_need {
     my ($status) = @_;
 
@@ -34,28 +36,34 @@ sub ev_event_to_mysql_event {
 sub run_queries_promise {
     my @queries  = @_;
 
-    my @connections = map MariaDB::NonBlocking->connect(
-                          {
-                              host         => 'localhost',
-                              user         => 'root',
-                              port         => 0,
-                              password     => "",
-                              database     => undef,
-                              mysql_socket => undef,
-                          }
-                      ), 1..3;
+    my @connections = map MariaDB::NonBlocking->init(), 1..3;
+
+    my $connect_args = {
+        host         => 'localhost',
+        user         => 'root',
+        port         => 0,
+        password     => "",
+        database     => undef,
+        mysql_socket => undef,
+        ssl => {
+#            ca     => '',
+        },
+    };
 
     my @promises;
     my (@query_results, @errors);
     foreach my $maria ( @connections ) {
         last if !@queries; # Huh.
 
+        # Note: we don't wait for this to finish.  When we later
+        # call ->run_query_start, that will internally call
+        # the ->connect_cont with the event as 0 -- meaning
+        # that nothing happened.
+        $maria->connect_start($connect_args);
+
         my $deferred = deferred;
         my $promise  = $deferred->promise;
         push @promises, $promise;
-
-        # We need to either wait for reads or writes.  Currently assuming
-        # all wait are going to be for reading
 
         my $socket_fd = $maria->mysql_socket_fd;
 
@@ -197,12 +205,12 @@ say "Going to wait on the promise!";
 $promise->then(
     sub {
         say "Done!";
-        say Dumper([\@_]);
+        say Dumper([map $_->[0][-1], @_]);
         $cv->send();
     },
     sub {
         say "Reject!";
-        say Dumper(\@_);
+        say Dumper([map $_->[0][-1], @_]);
         $cv->send;
     },
 );
