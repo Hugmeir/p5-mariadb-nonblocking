@@ -190,7 +190,7 @@ THX_usual_post_connect_shenanigans(pTHX_ SV* self)
 
     /* Grab socket_fd outside. */
     maria->thread_id = mysql_thread_id(&(maria->mysql));
-    store_in_self(
+    (void)store_in_self(
         "mysql_thread_id",
         newSVnv(maria->thread_id)
     );
@@ -274,7 +274,7 @@ THX_do_work(pTHX_ SV* self, MariaDB_client* maria, IV event)
                             );
 
                     maria->socket_fd = mysql_get_socket(&(maria->mysql));
-                    store_in_self(
+                    (void)store_in_self(
                         "mysql_socket_fd",
                         newSViv(maria->socket_fd)
                     );
@@ -818,7 +818,7 @@ CODE:
         croak("Failed to connect to MySQL: %s\n", mysql_error(&(maria->mysql)));
 
     maria->socket_fd = mysql_get_socket(&(maria->mysql));
-    store_in_self(
+    (void)store_in_self(
         "mysql_socket_fd",
         newSViv(maria->socket_fd)
     );
@@ -865,7 +865,7 @@ CODE:
      */
     save_hdelete(inner_self, pw_key_sv);
     SvREFCNT_inc(*svp);
-    hv_stores(inner_self, "password", *svp);
+    (void)hv_stores(inner_self, "password", *svp);
 
     unpack_config_from_hashref(self, args);
 
@@ -970,6 +970,7 @@ insert_id(SV* self)
 CODE:
     dMARIA;
     RETVAL = mysql_insert_id(&(maria->mysql));
+OUTPUT: RETVAL
 
 SV*
 quote(SV* self, SV* to_be_quoted)
