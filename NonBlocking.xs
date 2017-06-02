@@ -147,7 +147,7 @@ THX_add_row_to_results(pTHX_ MariaDB_client *maria, MYSQL_ROW row)
     unsigned long *lengths;
     SSize_t i = 0;
 
-    query_results = MUTABLE_SV(maria->query_results);
+    query_results = MUTABLE_AV(maria->query_results);
 
     field_count   = mysql_field_count(&(maria->mysql));
     lengths       = mysql_fetch_lengths(maria->res);
@@ -457,9 +457,9 @@ THX_do_work(pTHX_ SV* self, MariaDB_client* maria, IV event)
                     maria->is_cont = TRUE;
                 }
                 else {
-                    maria->is_cont = FALSE;
-                    query_results  = newSViv(ret);
-                    state          = STATE_STANDBY;
+                    maria->is_cont       = FALSE;
+                    maria->query_results = newSViv(ret);
+                    state                = STATE_STANDBY;
                 }
                 break;
             }
@@ -923,7 +923,7 @@ CODE:
 
     RETVAL = 0;
     if ( maria->current_state == STATE_DISCONNECTED ) {
-        maria->query_results = &PL_sv_true;
+        maria->query_results = &PL_sv_yes;
     }
     else if ( maria->current_state != STATE_STANDBY || maria->is_cont ) {
         croak("Cannot ping an active connection!!"); /* TODO moar info */
@@ -951,7 +951,7 @@ CODE:
 }
 OUTPUT: RETVAL
 
-IV
+SV*
 ping_result(SV* self)
 CODE:
 {
@@ -959,7 +959,8 @@ CODE:
     if ( maria->is_cont )
         croak("Cannot get the results of the ping, because we are still waiting on the server to respond!");
 
-    RETVAL = maria->query_results;
+    RETVAL               = maria->query_results;
+    maria->query_results = NULL;
 }
 OUTPUT: RETVAL
 
