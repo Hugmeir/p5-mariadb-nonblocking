@@ -36,7 +36,7 @@ typedef struct sql_config {
 } sql_config;
 
 typedef struct MariaDB_client {
-    MYSQL      mysql;
+    MYSQL*     mysql;
     MYSQL_RES* res;
 
     sql_config config;
@@ -85,7 +85,7 @@ free_mariadb_handle(pTHX_ SV* sv, MAGIC *mg)
     if ( !maria->destroyed ) {
         maria->destroyed = 1;
         if ( maria->current_state != STATE_DISCONNECTED )
-            mysql_close(&(maria->mysql));
+            mysql_close(maria->mysql);
 
         maria->is_cont       = FALSE;
         maria->current_state = STATE_DISCONNECTED;
@@ -149,7 +149,7 @@ THX_add_row_to_results(pTHX_ MariaDB_client *maria, MYSQL_ROW row)
 
     query_results = MUTABLE_AV(maria->query_results);
 
-    field_count   = mysql_field_count(&(maria->mysql));
+    field_count   = mysql_field_count(maria->mysql);
     lengths       = mysql_fetch_lengths(maria->res);
 
     row_results   = newAV();
@@ -189,7 +189,7 @@ THX_usual_post_connect_shenanigans(pTHX_ SV* self)
     maria->current_state   = STATE_STANDBY;
 
     /* Grab socket_fd outside. */
-    maria->thread_id = mysql_thread_id(&(maria->mysql));
+    maria->thread_id = mysql_thread_id(maria->mysql);
     (void)store_in_self(
         "mysql_thread_id",
         newSVnv(maria->thread_id)
@@ -248,7 +248,7 @@ THX_do_work(pTHX_ SV* self, MariaDB_client* maria, IV event)
                 break;
             case STATE_CONNECT:
             {
-                MYSQL *mysql_ret;
+                MYSQL *mysql_ret = 0;
                 if ( !maria->is_cont ) {
                     HV *inner_self = MUTABLE_HV(SvRV(self));
                     sql_config config = maria->config;
@@ -263,7 +263,7 @@ THX_do_work(pTHX_ SV* self, MariaDB_client* maria, IV event)
 
                     status = mysql_real_connect_start(
                                  &mysql_ret,
-                                 &(maria->mysql),
+                                 maria->mysql,
                                  config.hostname,
                                  config.username,
                                  password,
@@ -273,7 +273,7 @@ THX_do_work(pTHX_ SV* self, MariaDB_client* maria, IV event)
                                  config.client_opts
                             );
 
-                    maria->socket_fd = mysql_get_socket(&(maria->mysql));
+                    maria->socket_fd = mysql_get_socket(maria->mysql);
                     (void)store_in_self(
                         "mysql_socket_fd",
                         newSViv(maria->socket_fd)
@@ -282,16 +282,16 @@ THX_do_work(pTHX_ SV* self, MariaDB_client* maria, IV event)
                 else {
                     status = mysql_real_connect_cont(
                                 &mysql_ret,
-                                &(maria->mysql),
+                                maria->mysql,
                                 event
                              );
                     event = 0;
                 }
 
-                if (mysql_errno(&(maria->mysql)) > 0) {
+                if (mysql_errno(maria->mysql) > 0) {
                     maria->is_cont  = FALSE;
                     err             = 1;
-                    errstring       = mysql_error(&(maria->mysql));
+                    errstring       = mysql_error(maria->mysql);
                     state_for_error = STATE_DISCONNECTED;
                     break;
                 }
@@ -310,7 +310,7 @@ THX_do_work(pTHX_ SV* self, MariaDB_client* maria, IV event)
             }
             case STATE_QUERY:
                 if ( maria->is_cont ) {
-                    status = mysql_real_query_cont(&err, &(maria->mysql), event);
+                    status = mysql_real_query_cont(&err, maria->mysql, event);
                     event = 0;
                 }
                 else {
@@ -319,7 +319,7 @@ THX_do_work(pTHX_ SV* self, MariaDB_client* maria, IV event)
                     char* query_pv = SvPV(query_sv, query_len);
                     status = mysql_real_query_start(
                                 &err,
-                                &(maria->mysql),
+                                maria->mysql,
                                 query_pv,
                                 query_len
                              );
@@ -333,7 +333,7 @@ THX_do_work(pTHX_ SV* self, MariaDB_client* maria, IV event)
                     maria->is_cont = FALSE;
                     state          = STATE_STANDBY;
 
-                    errstring = mysql_error(&(maria->mysql));
+                    errstring = mysql_error(maria->mysql);
                 }
                 else if ( status ) {
                     maria->is_cont = TRUE; /* need to wait on the socket */
@@ -342,7 +342,7 @@ THX_do_work(pTHX_ SV* self, MariaDB_client* maria, IV event)
                     /* query finished */
                     maria->is_cont = FALSE; /* hooray! */
                     /* TODO option to mysql_store_result, state for that */
-                    maria->res     = mysql_use_result(&(maria->mysql));
+                    maria->res     = mysql_use_result(maria->mysql);
 
                     if ( maria->res ) {
                         /* query returned and we have results,
@@ -350,17 +350,17 @@ THX_do_work(pTHX_ SV* self, MariaDB_client* maria, IV event)
                          */
                         state = STATE_ROW_FETCH;
                     }
-                    else if ( mysql_field_count(&(maria->mysql)) == 0 ) {
+                    else if ( mysql_field_count(maria->mysql) == 0 ) {
                         /* query succeeded but returned no data */
                         /* TODO might want to store affected rows? */
-                        /*rows = mysql_affected_rows(&(maria->mysql));*/
+                        /*rows = mysql_affected_rows(maria->mysql);*/
                         prepare_new_result_accumulator(maria); /* empty results */
                         state = STATE_STANDBY;
                     }
                     else {
                         /* Error! */
                         err       = 1;
-                        errstring = mysql_error(&(maria->mysql));
+                        errstring = mysql_error(maria->mysql);
                         /* maria->res is NULL if we get here, so no need
                          * to go and free that
                          */
@@ -398,9 +398,9 @@ THX_do_work(pTHX_ SV* self, MariaDB_client* maria, IV event)
                             add_row_to_results(maria, row);
                         }
                         else {
-                            if ( mysql_errno(&(maria->mysql)) > 0 ) {
+                            if ( mysql_errno(maria->mysql) > 0 ) {
                                 err       = 1;
-                                errstring = mysql_error(&(maria->mysql));
+                                errstring = mysql_error(maria->mysql);
                             }
                             state = STATE_FREE_RESULT;
                         }
@@ -414,12 +414,12 @@ THX_do_work(pTHX_ SV* self, MariaDB_client* maria, IV event)
                             if ( row ) {
                                 add_row_to_results(maria, row);
                             }
-                            else if ( mysql_errno(&(maria->mysql)) > 0 ) {
+                            else if ( mysql_errno(maria->mysql) > 0 ) {
                                 /* Damn... We got an error while fetching
                                  * the rows.  Need to free the resultset
                                  */
                                 err       = 1;
-                                errstring = mysql_error(&(maria->mysql));
+                                errstring = mysql_error(maria->mysql);
                                 state     = STATE_FREE_RESULT;
                             }
                         }
@@ -446,11 +446,11 @@ THX_do_work(pTHX_ SV* self, MariaDB_client* maria, IV event)
             {
                 int ret;
                 if ( maria->is_cont ) {
-                    status = mysql_ping_cont(&ret, &(maria->mysql), event);
+                    status = mysql_ping_cont(&ret, maria->mysql, event);
                     event  = 0;
                 }
                 else {
-                    status = mysql_ping_start(&ret, &(maria->mysql));
+                    status = mysql_ping_start(&ret, maria->mysql);
                 }
 
                 if ( status ) {
@@ -508,13 +508,13 @@ THX_run_blocking_query(pTHX_ MariaDB_client* maria, SV* query_sv, bool want_resu
     if ( maria->current_state != STATE_STANDBY )
         croak("Cannot run a blocking query on this handle, because the internal state is on %s", state_to_name[maria->current_state]);
 
-    err = mysql_real_query( &(maria->mysql), query_pv, query_len );
+    err = mysql_real_query( maria->mysql, query_pv, query_len );
 
     if ( err ) {
         croak("welp!"); /* mysql_errstring */
     }
 
-    maria->res = mysql_store_result(&(maria->mysql));
+    maria->res = mysql_store_result(maria->mysql);
 
     prepare_new_result_accumulator(maria);
 
@@ -524,28 +524,37 @@ THX_run_blocking_query(pTHX_ MariaDB_client* maria, SV* query_sv, bool want_resu
             while ((row = mysql_fetch_row(maria->res)))
                 add_row_to_results(maria, row);
         }
-        rows = mysql_affected_rows(&(maria->mysql));
+        rows = mysql_affected_rows(maria->mysql);
         mysql_free_result(maria->res);
         maria->res = NULL;
     }
-    else if ( mysql_field_count(&(maria->mysql)) == 0 ) {
+    else if ( mysql_field_count(maria->mysql) == 0 ) {
         /* query succeeded but returned no data */
-        rows = mysql_affected_rows(&(maria->mysql));
+        rows = mysql_affected_rows(maria->mysql);
     }
     else {
         /* Error! */
-        croak("%s", mysql_error(&(maria->mysql)));
+        croak("%s", mysql_error(maria->mysql));
     }
 
     return rows;
 }
+
+#define maybe_init_mysql_connection(mysql) STMT_START {                     \
+    if ( !mysql ) {                                                       \
+        my_bool reconnect = 0;                                              \
+        Newxz(mysql, 1, MYSQL); \
+        mysql_init(mysql);                                               \
+        mysql_options(mysql, MYSQL_OPT_NONBLOCK, 0);                     \
+        mysql_options(mysql, MYSQL_OPT_RECONNECT, &reconnect);    \
+    }                                                                       \
+} STMT_END
 
 SV*
 THX_init_self(pTHX_ SV* classname)
 #define init_self(c) THX_init_self(aTHX_ c)
 {
     SV* self;
-    my_bool reconnect = 0;
 
     MariaDB_client *maria;
     Newxz(maria, 1, MariaDB_client);
@@ -555,10 +564,7 @@ THX_init_self(pTHX_ SV* classname)
     maria->socket_fd     = -1;
     maria->thread_id     = -1;
 
-    mysql_init(&(maria->mysql));
-    mysql_options(&(maria->mysql), MYSQL_OPT_NONBLOCK, 0);
-    /* Always disable, we want to deal with these manually */
-    mysql_options(&(maria->mysql), MYSQL_OPT_RECONNECT, &reconnect);
+    maybe_init_mysql_connection(maria->mysql);
 
     /* create a reference to a hash, bless into $classname, then add the
      * magic we need
@@ -628,7 +634,7 @@ THX_mysql_opt_integer(pTHX_ MariaDB_client* maria, HV* hv, const char* str, STRL
     value = SvIV(*svp);
     if ( value ) /* huh... */
         mysql_options(
-            &(maria->mysql),
+            maria->mysql,
             option,
             (const char*)&value
         );
@@ -659,7 +665,7 @@ THX_unpack_config_from_hashref(pTHX_ SV* self, HV* args)
     /* TODO: DBD::mysql compat mysql_enable_utf8 / mysql_enable_utf8mb4 */
     if ( config->charset_name && strlen(config->charset_name) )
         mysql_options(
-            &(maria->mysql),
+            maria->mysql,
             MYSQL_SET_CHARSET_NAME,
             config->charset_name
         );
@@ -667,7 +673,7 @@ THX_unpack_config_from_hashref(pTHX_ SV* self, HV* args)
     if ( config->unix_socket && strlen(config->unix_socket) ) {
         const int xxx = MYSQL_PROTOCOL_SOCKET;
         mysql_options(
-            &(maria->mysql),
+            maria->mysql,
             MYSQL_OPT_PROTOCOL,
             &xxx
         );
@@ -678,7 +684,7 @@ THX_unpack_config_from_hashref(pTHX_ SV* self, HV* args)
     if ( FETCH_FROM_HV("mysql_init_command") && SvTRUE(*svp) ) {
         const char* init_command = SvPV_nolen_const(*svp);
         mysql_options(
-            &(maria->mysql),
+            maria->mysql,
             MYSQL_INIT_COMMAND,
             init_command
         );
@@ -686,7 +692,7 @@ THX_unpack_config_from_hashref(pTHX_ SV* self, HV* args)
 
     if ( FETCH_FROM_HV("mysql_compression") ) {
         mysql_options(
-            &(maria->mysql),
+            maria->mysql,
             MYSQL_OPT_COMPRESS,
             NULL /* unused */
         );
@@ -734,7 +740,7 @@ THX_unpack_config_from_hashref(pTHX_ SV* self, HV* args)
 
 /*
         mysql_options(
-            &(maria->mysql),
+            maria->mysql,
             MYSQL_OPT_SSL_MODE,
             reject_unauthorized
                 ? &SSL_MODE_REQUIRED
@@ -749,7 +755,7 @@ THX_unpack_config_from_hashref(pTHX_ SV* self, HV* args)
          */
 
         mysql_options(
-            &(maria->mysql),
+            maria->mysql,
             MYSQL_OPT_SSL_VERIFY_SERVER_CERT,
             &reject_unauthorized
         );
@@ -758,7 +764,7 @@ THX_unpack_config_from_hashref(pTHX_ SV* self, HV* args)
 #define DEFAULT_CIPHERS "ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-SHA384:ECDHE-RSA-AES256-SHA384:ECDHE-ECDSA-AES128-SHA256:ECDHE-RSA-AES128-SHA256"
 
         mysql_ssl_set(
-            &(maria->mysql),
+            maria->mysql,
             config->ssl_key,
             config->ssl_cert,
             config->ssl_ca,
@@ -828,7 +834,7 @@ CODE:
 
     /* blocking connect! */
     connect_return = mysql_real_connect(
-                        &(maria->mysql),
+                        maria->mysql,
                         config.hostname,
                         config.username,
                         password,
@@ -839,9 +845,9 @@ CODE:
                     );
 
     if ( !connect_return )
-        croak("Failed to connect to MySQL: %s\n", mysql_error(&(maria->mysql)));
+        croak("Failed to connect to MySQL: %s\n", mysql_error(maria->mysql));
 
-    maria->socket_fd = mysql_get_socket(&(maria->mysql));
+    maria->socket_fd = mysql_get_socket(maria->mysql);
     (void)store_in_self(
         "mysql_socket_fd",
         newSViv(maria->socket_fd)
@@ -891,6 +897,8 @@ CODE:
     SvREFCNT_inc(*svp);
     (void)hv_stores(inner_self, "password", *svp);
 
+    /* might be uninitialized due to a previous disconnect */
+    maybe_init_mysql_connection(maria->mysql);
     unpack_config_from_hashref(self, args);
 
     RETVAL = do_work(self, maria, 0);
@@ -1035,14 +1043,14 @@ UV
 get_timeout_value_ms(SV* self)
 CODE:
     dMARIA;
-    RETVAL = mysql_get_timeout_value_ms(&(maria->mysql));
+    RETVAL = mysql_get_timeout_value_ms(maria->mysql);
 OUTPUT: RETVAL
 
 NV
 insert_id(SV* self)
 CODE:
     dMARIA;
-    RETVAL = mysql_insert_id(&(maria->mysql));
+    RETVAL = mysql_insert_id(maria->mysql);
 OUTPUT: RETVAL
 
 SV*
@@ -1072,7 +1080,7 @@ CODE:
         escaped_buffer = SvPVX_mutable(escaped);
 
         new_length = mysql_real_escape_string(
-            &(maria->mysql),
+            maria->mysql,
             escaped_buffer,
             to_be_quoted_pv,
             to_be_quoted_len
@@ -1091,6 +1099,7 @@ CODE:
         SvREFCNT_dec(maria->query_sv);
         maria->query_sv = NULL;
     }
+
     if ( maria->res ) {
         /* do a best attempt... */
         int status = mysql_free_result_start(maria->res);
@@ -1099,8 +1108,12 @@ CODE:
         }
         maria->res     = NULL;
     }
-    if ( maria->current_state != STATE_DISCONNECTED )
-        mysql_close(&(maria->mysql));
+
+    if ( maria->current_state != STATE_DISCONNECTED ) {
+        mysql_close(maria->mysql);
+        Safefree(maria->mysql);
+        maria->mysql = NULL;
+    }
 
     maria->is_cont       = FALSE;
     maria->current_state = STATE_DISCONNECTED;
