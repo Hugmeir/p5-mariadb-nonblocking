@@ -1063,7 +1063,7 @@ CODE:
     const char* to_be_quoted_pv = SvPV(to_be_quoted, to_be_quoted_len);
 
     if ( !to_be_quoted_len ) {
-        escaped = sv_2mortal(newSVpvs(""));
+        RETVAL = newSVpvs("");
     }
     else {
         UV new_length;
@@ -1076,8 +1076,10 @@ CODE:
 
         new_len_needed = to_be_quoted_len * 2 + 1;
 
-        escaped        = sv_2mortal(newSV(new_len_needed));
-        escaped_buffer = SvPVX_mutable(escaped);
+        RETVAL         = newSV(new_len_needed);
+        escaped_buffer = SvPVX_mutable(RETVAL);
+
+        SvPOK_on(RETVAL);
 
         new_length = mysql_real_escape_string(
             maria->mysql,
@@ -1085,9 +1087,10 @@ CODE:
             to_be_quoted_pv,
             to_be_quoted_len
         );
-        SvCUR_set(escaped, (STRLEN)new_length);
+        SvCUR_set(RETVAL, (STRLEN)new_length);
+        if ( SvUTF8(to_be_quoted) )
+            SvUTF8_on(RETVAL);
     }
-    RETVAL = escaped;
 }
 OUTPUT: RETVAL
 
