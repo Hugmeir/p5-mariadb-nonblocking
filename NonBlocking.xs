@@ -511,7 +511,7 @@ THX_run_blocking_query(pTHX_ MariaDB_client* maria, SV* query_sv, bool want_resu
     err = mysql_real_query( maria->mysql, query_pv, query_len );
 
     if ( err ) {
-        croak("welp!"); /* mysql_errstring */
+        croak("%s", mysql_error(maria->mysql)); /* mysql_errstring */
     }
 
     maria->res = mysql_store_result(maria->mysql);
@@ -1010,14 +1010,25 @@ CODE:
 }
 OUTPUT: RETVAL
 
+const char*
+current_state(SV* self)
+CODE:
+{
+    dMARIA;
+    RETVAL = state_to_name[maria->current_state];
+}
+OUTPUT: RETVAL
+
 IV
 run_query_cont(SV* self, ...)
 CODE:
 {
     dMARIA;
     IV event = 0;
-    if ( !maria->is_cont )
-        croak("Calling run_query_cont, but the internal state does not match up to that");
+
+    if ( !maria->is_cont ) {
+        croak("Calling run_query_cont, but the internal state does not match up to that: <%d><%s>", maria->socket_fd, state_to_name[maria->current_state]);
+    }
 
     /*
      * If we have more than one item, it should be the event(s) that
