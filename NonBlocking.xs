@@ -1069,38 +1069,48 @@ quote(SV* self, SV* to_be_quoted)
 CODE:
 {
     dMARIA;
-    SV* escaped;
+
+    if ( !SvOK(to_be_quoted) ) {
+        RETVAL = newSVpvs("NULL");
+    }
+    else {
     STRLEN to_be_quoted_len;
     const char* to_be_quoted_pv = SvPV(to_be_quoted, to_be_quoted_len);
 
     if ( !to_be_quoted_len ) {
-        RETVAL = newSVpvs("");
+        RETVAL = newSVpvs("\"\"");
     }
     else {
         UV new_length;
         char * escaped_buffer;
         STRLEN new_len_needed;
         
-        if ( (to_be_quoted_len+1) > (MEM_SIZE_MAX/2) ) {
+        if ( (to_be_quoted_len+3) > (MEM_SIZE_MAX/2) ) {
             croak("Cannot quote absurdly long string, would cause an overflow");
         }
 
-        new_len_needed = to_be_quoted_len * 2 + 1;
+        /* mysql_real_escape_string needs len of string*2 plus one byte for the null */
+        /* we mimick DBI behavior and return this with quotes */
+        new_len_needed = to_be_quoted_len * 2 + 3;
 
         RETVAL         = newSV(new_len_needed);
         escaped_buffer = SvPVX_mutable(RETVAL);
+        escaped_buffer[0] = '\'';
 
         SvPOK_on(RETVAL);
 
         new_length = mysql_real_escape_string(
             maria->mysql,
-            escaped_buffer,
+            escaped_buffer+1,
             to_be_quoted_pv,
             to_be_quoted_len
         );
-        SvCUR_set(RETVAL, (STRLEN)new_length);
+        escaped_buffer[new_length+1] = '\'';
+        escaped_buffer[new_length+2] = '\0';
+        SvCUR_set(RETVAL, (STRLEN)new_length + 2);
         if ( SvUTF8(to_be_quoted) )
             SvUTF8_on(RETVAL);
+    }
     }
 }
 OUTPUT: RETVAL
