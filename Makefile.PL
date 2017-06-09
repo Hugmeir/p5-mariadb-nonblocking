@@ -13,6 +13,20 @@ GetOptions(
     'mariadb_path=s'               => \my $mariadb_path,
 );
 
+sub libname_to_so_names {
+    my ($wanted_lib) = @_;
+
+    my @config_entries = qw/dlext so/;
+
+    my @libs_as_paths = map +( $_, "lib$_" ),
+                        map "${wanted_lib}$_",
+                        map +(/\A\./ ? $_ : ".$_"),
+                        grep +(defined($_) && length($_)),
+                          @Config{@config_entries};
+
+    return @libs_as_paths;
+}
+
 sub get_paths_out_of_config_and_split {
     my @paths;
     foreach my $config_key ( @_ ) {
@@ -49,7 +63,7 @@ sub get_paths_out_of_config_and_split {
                         locincpath
                         usrinc
                     /);
-    unshift @incpaths, $mariadb_path, File::Spec->catdir($mariadb_path, "inc")
+    unshift @incpaths, $mariadb_path, File::Spec->catdir($mariadb_path, "include")
         if $mariadb_path;
     sub find_incpath_for { grep defined, map find_file_in($_, @incpaths), @_ }
 }
@@ -90,6 +104,28 @@ sub run_grab_output {
 my @wanted_libs = qw( ssl crypto iconv  );
 
 my ($libs, $inc, $ccflags, $lddlflags) = map $_//'',@Config{qw/libs inc ccflags lddlflags/};
+
+# Perl might want to compile using -lgdbm or somesuch, but
+# no such file may exist on this system.  So so some sleuthing.
+my $cleaned_libs = "";
+foreach my $lib ( split / /, $libs ) {
+    if ( $lib !~ /\A-l/ ) {
+        $cleaned_libs .= "$lib ";
+        next;
+    }
+
+    my $wanted_lib = $lib;
+    $wanted_lib =~ s/-l//;
+
+    my @wanted_so = libname_to_so_names($wanted_lib);
+
+    next unless @wanted_so;
+    next unless find_libpath_for(@wanted_so);
+
+    $cleaned_libs .= "$lib ";
+}
+$libs = $cleaned_libs;
+
 if ( $statically_link_mariadbclient ) {
     my @needed_libs = qw( mariadbclient );
 
@@ -107,6 +143,7 @@ if ( $statically_link_mariadbclient ) {
             my $file = File::Spec->catfile($path, $lib);
             next unless -f $file;
             $lddlflags .= " $file";
+            $libs      .= " -L$path -lmariadbclient";
             next LIB;
         }
     }
@@ -123,13 +160,7 @@ else {
 
 LIB:
 foreach my $wanted_lib (@wanted_libs) {
-    my @config_entries = qw/dlext so/;
-
-    my @libs_as_paths = map +( $_, "lib$_" ),
-                        map "${wanted_lib}$_",
-                        map +(/\A\./ ? $_ : ".$_"),
-                        grep +(defined($_) && length($_)),
-                          @Config{@config_entries};
+    my @libs_as_paths = libname_to_so_names($wanted_lib);
 
     foreach my $lib ( @libs_as_paths ) {
         my ($libpath) = find_libpath_for($lib);
