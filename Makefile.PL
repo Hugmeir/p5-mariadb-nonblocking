@@ -8,6 +8,11 @@ use Config       qw/%Config/;
 use IPC::Cmd     qw/can_run run/;
 use Getopt::Long qw/GetOptions/;
 
+GetOptions(
+    'static_link_to_mariadbclient' => \my $statically_link_mariadbclient,
+    'mariadb_path=s'               => \my $mariadb_path,
+);
+
 sub get_paths_out_of_config_and_split {
     my @paths;
     foreach my $config_key ( @_ ) {
@@ -30,6 +35,9 @@ sub get_paths_out_of_config_and_split {
                         glibpath
                     /);
 
+    unshift @libpaths, $mariadb_path, File::Spec->catdir($mariadb_path, "lib")
+        if $mariadb_path;
+
     sub find_libpath_for { grep defined, map find_file_in($_, @libpaths), @_ }
 }
 
@@ -41,6 +49,8 @@ sub get_paths_out_of_config_and_split {
                         locincpath
                         usrinc
                     /);
+    unshift @incpaths, $mariadb_path, File::Spec->catdir($mariadb_path, "inc")
+        if $mariadb_path;
     sub find_incpath_for { grep defined, map find_file_in($_, @incpaths), @_ }
 }
 
@@ -78,10 +88,6 @@ sub run_grab_output {
 }
 
 my @wanted_libs = qw( ssl crypto iconv  );
-
-GetOptions(
-    'static_link_to_mariadbclient' => \my $statically_link_mariadbclient,
-);
 
 my ($libs, $inc, $ccflags, $lddlflags) = map $_//'',@Config{qw/libs inc ccflags lddlflags/};
 if ( $statically_link_mariadbclient ) {
