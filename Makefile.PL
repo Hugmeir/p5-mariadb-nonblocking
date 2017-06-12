@@ -142,7 +142,7 @@ if ( $statically_link_mariadbclient ) {
         foreach my $lib (@libfilenames) {
             my $file = File::Spec->catfile($path, $lib);
             next unless -f $file;
-            $lddlflags .= " $file";
+#            $lddlflags .= " $file";
             $libs      .= " -L$path -lmariadbclient";
             next LIB;
         }
