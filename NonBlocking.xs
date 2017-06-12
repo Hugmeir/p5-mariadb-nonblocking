@@ -457,9 +457,17 @@ THX_do_work(pTHX_ SV* self, MariaDB_client* maria, IV event)
                     maria->is_cont = TRUE;
                 }
                 else {
+                    /* Ping finished! */
                     maria->is_cont       = FALSE;
-                    maria->query_results = newSViv(ret);
                     state                = STATE_STANDBY;
+
+                    if ( ret ) {
+                        const char* ping_error = mysql_error(maria->mysql);
+                        maria->query_results = newSVpvn( ping_error, strlen(ping_error) );
+                    }
+                    else {
+                        maria->query_results = &PL_sv_no;
+                    }
                 }
                 break;
             }
@@ -917,8 +925,11 @@ CODE:
     /* state here really should be STATE_CONNECT */
     if ( !maria->is_cont )
         croak("Calling connect_cont, but the internal state does not match up to that");
-    if ( items > 1 )
+    if ( items > 1 ) {
+        if ( ST(1) == self )
+            croak("Called $self->connect_cont($self), wtf?");
         event = SvIV(ST(1));
+    }
     RETVAL = do_work(self, maria, event);
 }
 OUTPUT: RETVAL
@@ -931,7 +942,7 @@ CODE:
 
     RETVAL = 0;
     if ( maria->current_state == STATE_DISCONNECTED ) {
-        maria->query_results = &PL_sv_yes;
+        maria->query_results = newSVpvs("Not connected to MySQL, automatically failed ping");
     }
     else if ( maria->current_state != STATE_STANDBY || maria->is_cont ) {
         croak("Cannot ping an active connection!!"); /* TODO moar info */
@@ -952,8 +963,11 @@ CODE:
 {
     dMARIA;
     IV event = 0;
-    if ( items > 1 )
+    if ( items > 1 ) {
+        if ( ST(1) == self )
+            croak("Called $self->connect_cont($self), wtf?");
         event = SvIV(ST(1));
+    }
 
     RETVAL = do_work(self, maria, event);
 }
