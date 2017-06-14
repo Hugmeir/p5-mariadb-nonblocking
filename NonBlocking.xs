@@ -996,7 +996,11 @@ CODE:
     if ( maria->query_sv )
         croak("Query already waiting to be run!!!!");
 
-    maria->query_sv = query; /* yeah, sharing the SV */
+    /* See if we can cheat!  We don't need to copy the query's buffer yet --
+     * if we do into the state machine and manage to run mysql_real_query_start,
+     * we won't need to copy this at all!
+     */
+    maria->query_sv = query; /* yeah, sharing the SV, for now.  See the comment above */
     SvREFCNT_inc(query);
 
     prepare_new_result_accumulator(maria); /* TODO should this happen inside do_work? */
@@ -1020,6 +1024,17 @@ CODE:
     }
     else {
         RETVAL = do_work(self, maria, 0);
+    }
+
+    if ( maria->query_sv ) {
+        /* Lousy.  We did not manage to go far enough into the state machine.
+         * We now have to copy the query SV -- keeping the original around is
+         * NOT an option since it may be re-used by our caller
+	 * XXX TODO: could keep the original while replacing query's internals
+         * to point to a COW string.  That might lead to less copying.
+         */
+	SvREFCNT_dec(query); /* since we increased it before */
+	maria->query_sv = newSVsv(maria->query_sv); /* the sole refcnt will belong to us */
     }
 }
 OUTPUT: RETVAL
