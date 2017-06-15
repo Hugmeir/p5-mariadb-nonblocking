@@ -354,7 +354,7 @@ THX_do_work(pTHX_ SV* self, MariaDB_client* maria, IV event)
                         /* query succeeded but returned no data */
                         /* TODO might want to store affected rows? */
                         /*rows = mysql_affected_rows(maria->mysql);*/
-                        prepare_new_result_accumulator(maria); /* empty results */
+                        /*prepare_new_result_accumulator(maria);*/ /* empty results */
                         state = STATE_STANDBY;
                     }
                     else {
@@ -392,7 +392,7 @@ THX_do_work(pTHX_ SV* self, MariaDB_client* maria, IV event)
                 MYSQL_ROW row = 0;
                 if ( maria->is_cont ) {
                     status = mysql_fetch_row_cont(&row, maria->res, event);
-                    event = 0;
+                    event  = 0;
                     if (!status) {
                         if ( row ) {
                             add_row_to_results(maria, row);
@@ -409,6 +409,7 @@ THX_do_work(pTHX_ SV* self, MariaDB_client* maria, IV event)
                 }
                 else {
                     do {
+			row    = 0;
                         status = mysql_fetch_row_start(&row, maria->res);
                         if (!status) {
                             if ( row ) {
@@ -1076,7 +1077,8 @@ SV*
 query_results(SV* self)
 CODE:
     dMARIA;
-    RETVAL = newRV(MUTABLE_SV(maria->query_results));
+    RETVAL = newRV_noinc(MUTABLE_SV(maria->query_results ? maria->query_results : newAV())); /* newRV_noinc will take ownership of the refcount */
+    maria->query_results = NULL;
 OUTPUT: RETVAL
 
 UV
