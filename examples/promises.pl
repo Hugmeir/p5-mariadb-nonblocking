@@ -45,9 +45,10 @@ sub run_queries_promise {
         password     => "",
         database     => undef,
         mysql_socket => undef,
-        ssl => {
+        mysql_use_results => 1,
+#        ssl => {
 #            ca     => '',
-        },
+#        },
     };
 
     my @promises;

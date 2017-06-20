@@ -53,6 +53,11 @@ typedef struct MariaDB_client {
     int current_state;
     int last_status;
 
+    /* Should we buffer the entire resultset once the query is done,
+     * or fetch it row-by-row?
+     */
+    bool store_query_result;
+
     /* DESTROY has been called, we already freed the memory we allocated */
     bool destroyed;
 } MariaDB_client;
@@ -70,7 +75,7 @@ typedef struct MariaDB_client {
 } STMT_END
 
 /* Stolen from http://stackoverflow.com/a/37277144 */
-#define NAMES C(DISCONNECTED)C(STANDBY)C(CONNECT)C(QUERY)C(ROW_FETCH)C(FREE_RESULT)C(PING)
+#define NAMES C(DISCONNECTED)C(STANDBY)C(CONNECT)C(QUERY)C(ROW_FETCH)C(FREE_RESULT)C(PING)C(STORE_RESULT)
 #define C(x) STATE_##x,
 enum color { NAMES STATE_END };
 #undef C
@@ -146,6 +151,13 @@ THX_add_row_to_results(pTHX_ MariaDB_client *maria, MYSQL_ROW row)
     int field_count;
     unsigned long *lengths;
     SSize_t i = 0;
+
+    if (!maria->query_results) {
+        /* we can reach this code if the results are requested
+         * whilst we are still gathering rows from the server.
+         */
+        maria->query_results = MUTABLE_SV(newAV());
+    }
 
     query_results = MUTABLE_AV(maria->query_results);
 
@@ -342,31 +354,79 @@ THX_do_work(pTHX_ SV* self, MariaDB_client* maria, IV event)
                     /* query finished */
                     maria->is_cont = FALSE; /* hooray! */
                     /* TODO option to mysql_store_result, state for that */
-                    maria->res     = mysql_use_result(maria->mysql);
-
-                    if ( maria->res ) {
-                        /* query returned and we have results,
-                         * start fetching!
-                         */
-                        state = STATE_ROW_FETCH;
-                    }
-                    else if ( mysql_field_count(maria->mysql) == 0 ) {
-                        /* query succeeded but returned no data */
-                        /* TODO might want to store affected rows? */
-                        /*rows = mysql_affected_rows(maria->mysql);*/
-                        /*prepare_new_result_accumulator(maria);*/ /* empty results */
-                        state = STATE_STANDBY;
+                    if ( maria->store_query_result ) {
+                        state = STATE_STORE_RESULT;
                     }
                     else {
-                        /* Error! */
-                        err       = 1;
-                        errstring = mysql_error(maria->mysql);
-                        /* maria->res is NULL if we get here, so no need
-                         * to go and free that
-                         */
-                        state  = STATE_STANDBY;
+                        maria->res     = mysql_use_result(maria->mysql);
+
+                        if ( maria->res ) {
+                            /* query returned and we have results,
+                             * start fetching!
+                             */
+                            state = STATE_ROW_FETCH;
+                        }
+                        else if ( mysql_field_count(maria->mysql) == 0 ) {
+                            /* query succeeded but returned no data */
+                            /* TODO might want to store affected rows? */
+                            /*rows = mysql_affected_rows(maria->mysql);*/
+                            /*prepare_new_result_accumulator(maria);*/ /* empty results */
+                            state = STATE_STANDBY;
+                        }
+                        else {
+                            /* Error! */
+                            err       = 1;
+                            errstring = mysql_error(maria->mysql);
+                            /* maria->res is NULL if we get here, so no need
+                             * to go and free that
+                             */
+                            state  = STATE_STANDBY;
+                        }
                     }
                 }
+                break;
+            case STATE_STORE_RESULT:
+                if ( maria->is_cont ) {
+                    status = mysql_store_result_cont(&(maria->res), maria->mysql, event);
+                    event  = 0;
+                }
+                else {
+                    status = mysql_store_result_start(&(maria->res), maria->mysql);
+                }
+
+                if ( status ) {
+                    maria->is_cont = TRUE;
+                }
+                else {
+                    /* we are done getting the results! */
+                    maria->is_cont = FALSE;
+                    if ( mysql_errno(maria->mysql) > 0 ) {
+                        err       = 1;
+                        errstring = mysql_error(maria->mysql);
+                    }
+                    else {
+                        if ( !maria->res ) {
+                            /* query was successful but returned nothing */
+                            /* nothing to do, really */
+                        }
+                        else if ( mysql_field_count(maria->mysql) == 0 ) {
+                            /* same */
+                        }
+                        else {
+                            /* query was successful and we have all the results in memory.  Put them in perl! */
+                            while (1) {
+                                /* this will never block */
+                                MYSQL_ROW row = mysql_fetch_row(maria->res);
+                                if ( !row )
+                                    break;
+
+                                add_row_to_results(maria, row);
+                            }
+                        }
+                    }
+                    state = STATE_FREE_RESULT;
+                }
+
                 break;
             case STATE_FREE_RESULT:
                 if ( maria->is_cont ) {
@@ -409,7 +469,7 @@ THX_do_work(pTHX_ SV* self, MariaDB_client* maria, IV event)
                 }
                 else {
                     do {
-			row    = 0;
+			            row    = 0;
                         status = mysql_fetch_row_start(&row, maria->res);
                         if (!status) {
                             if ( row ) {
@@ -572,6 +632,7 @@ THX_init_self(pTHX_ SV* classname)
     maria->current_state = STATE_DISCONNECTED;
     maria->socket_fd     = -1;
     maria->thread_id     = -1;
+    maria->store_query_result = TRUE;
 
     maybe_init_mysql_connection(maria->mysql);
 
@@ -670,6 +731,10 @@ THX_unpack_config_from_hashref(pTHX_ SV* self, HV* args)
     ((svp = hv_fetch(args, s, sizeof(s)-1, FALSE)) && *svp && SvOK(*svp))
 
     config->port = FETCH_FROM_HV("port") ? SvIV(*svp) : 0;
+
+    maria->store_query_result = FETCH_FROM_HV("mysql_use_results")
+                                    ? cBOOL(SvTRUE(*svp) ? FALSE : TRUE)
+                                    : TRUE;
 
     /* TODO: DBD::mysql compat mysql_enable_utf8 / mysql_enable_utf8mb4 */
     if ( config->charset_name && strlen(config->charset_name) )
@@ -1077,7 +1142,7 @@ SV*
 query_results(SV* self)
 CODE:
     dMARIA;
-    RETVAL = newRV_noinc(MUTABLE_SV(maria->query_results ? maria->query_results : newAV())); /* newRV_noinc will take ownership of the refcount */
+    RETVAL = newRV_noinc(maria->query_results ? maria->query_results : MUTABLE_SV(newAV())); /* newRV_noinc will take ownership of the refcount */
     maria->query_results = NULL;
 OUTPUT: RETVAL
 
