@@ -18,12 +18,26 @@
 typedef struct sql_config {
     /* passed to mysql_real_connect(_start) */
     const char* username;
-    /* Note: No password here! We never copy it from the original SV */
     const char* hostname;
     const char* unix_socket;
     const char* database;
     unsigned int  port;
     unsigned long client_opts;
+
+    /* We may temporarily hold a pointer to the SV that holds the
+     * password.
+     * If we have auto-reconnect enabled, then this will hold
+     * a real SV that we have ownership to, but that is not
+     * yet implemented, since it seems like a bad idea to me.
+     *
+     * Instead, this should never be assigned to normally;
+     * rather, it should be temporarily given values via
+     * one of Perl's save-and-restore-at-end-of-scope values.
+     * Also note that we'll go through some lengths to
+     * not needlessly copy the password out of the SV, but more
+     * on that later.
+     */
+    SV* password_temp;
 
     const char* charset_name;
 
@@ -83,63 +97,113 @@ enum color { NAMES STATE_END };
 const char * const state_to_name[] = { NAMES };
 #undef C
 
+void
+THX_free_our_config_items(pTHX_ sql_config* config)
+#define free_our_config_items(c) THX_free_our_config_items(aTHX_ c)
+{
+    Safefree(config->username);
+    Safefree(config->hostname);
+    Safefree(config->unix_socket);
+    Safefree(config->database);
+    Safefree(config->charset_name);
+    Safefree(config->ssl_key);
+    Safefree(config->ssl_cert);
+    Safefree(config->ssl_ca);
+    Safefree(config->ssl_capath);
+    Safefree(config->ssl_cipher);
+    return;
+}
+
+void
+THX_disconnect_generic(pTHX_ MariaDB_client* maria)
+#define disconnect_generic(maria) THX_disconnect_generic(aTHX_ maria)
+{
+    if ( maria->mysql && maria->current_state != STATE_DISCONNECTED ) {
+        mysql_close(maria->mysql);
+        Safefree(maria->mysql);
+        maria->mysql = NULL;
+    }
+
+    maria->is_cont       = FALSE;
+    maria->current_state = STATE_DISCONNECTED;
+
+    if ( maria->query_sv ) {
+        SvREFCNT_dec(maria->query_sv);
+        maria->query_sv = NULL;
+    }
+
+    if ( maria->res ) {
+        /* do a best attempt... */
+        int status = mysql_free_result_start(maria->res);
+        if ( status ) {
+            /* TODO leaking memory */
+            /* Damn.  Would've blocked trying to free the result.  Not much we can do */
+        }
+        maria->res     = NULL;
+    }
+
+    return;
+}
+
 static int
 free_mariadb_handle(pTHX_ SV* sv, MAGIC *mg)
 {
+
     MariaDB_client* maria = (MariaDB_client*)mg->mg_ptr;
-    if ( !maria->destroyed ) {
-        maria->destroyed = 1;
-        if ( maria->current_state != STATE_DISCONNECTED )
-            mysql_close(maria->mysql);
+    sql_config config = maria->config;
 
-        maria->is_cont       = FALSE;
-        maria->current_state = STATE_DISCONNECTED;
-
-        if ( maria->query_sv ) {
-            SvREFCNT_dec(maria->query_sv);
-            maria->query_sv = NULL;
-        }
-
-        /* TODO merge with the other disconnect code */
-
-        /* TODO free config and everything inside of it */
-
-        Safefree(maria); /* free the memory we Newxz'd before */
-        /* mg will be freed by our caller */
+    if ( maria->destroyed ) {
+        return 0;
     }
+
+    maria->destroyed = 1;
+
+    disconnect_generic(maria);
+
+    /* Free all the config items we may have allocated */
+    free_our_config_items(&config);
+
+    Safefree(maria); /* free the memory we Newxz'd before */
+    /* mg will be freed by our caller */
 
     return 0;
 }
 
 static MGVTBL maria_vtable = { .svt_free = free_mariadb_handle };
 
-
 const char*
-THX_fetch_password_try_not_to_copy_buffer(pTHX_ HV* hv)
-#define fetch_password_try_not_to_copy_buffer(a) \
-    THX_fetch_password_try_not_to_copy_buffer(aTHX_ a)
+THX_fetch_pv_try_not_to_copy_buffer(pTHX_ SV* password_sv)
+#define fetch_pv_try_not_to_copy_buffer(a) \
+    THX_fetch_pv_try_not_to_copy_buffer(aTHX_ a)
 {
     const char* password = NULL;
-    SV **svp = hv_fetchs(hv, "password", 0);
 
-    if ( !svp || !*svp || !SvOK(*svp) ) {
+    if ( !password_sv || !SvOK(password_sv) ) {
         return NULL;
     }
 
-    if ( SvPOK(*svp) && !SvGMAGICAL(*svp) ) {
+    if ( SvPOK(password_sv) && !SvGMAGICAL(password_sv) ) {
         /* Er... this is probably a bad assumption on my part.
          * Basically, I'm guessing that SvPOK means we are good
          * to just access the pv buffer directly.
          * This is the ideal situation!
          */
-        password = SvPVX_const(*svp);
+        password = SvPVX_const(password_sv);
     }
     else {
         /* magic and/or weird shit */
-        password = SvPV_nolen(*svp);
+        password = SvPV_nolen(password_sv);
     }
 
     return password;
+}
+
+const char*
+THX_fetch_password_try_not_to_copy_buffer(pTHX_ MariaDB_client *maria)
+#define fetch_password_try_not_to_copy_buffer(a) \
+    THX_fetch_password_try_not_to_copy_buffer(aTHX_ a)
+{
+    return fetch_pv_try_not_to_copy_buffer(maria->config.password_temp);
 }
 
 int
@@ -218,7 +282,10 @@ THX_do_work(pTHX_ SV* self, MariaDB_client* maria, IV event)
     int status          = 0;
     int state           = maria->current_state;
     int state_for_error = STATE_STANDBY; /* query errors */
+    sql_config config   = maria->config;
     const char* errstring;
+
+#define have_password_in_memory(config) (config.password_temp && SvOK(config.password_temp))
 
     while ( 1 ) {
         if ( err )
@@ -230,7 +297,7 @@ THX_do_work(pTHX_ SV* self, MariaDB_client* maria, IV event)
         if ( state == STATE_STANDBY && !maria->query_sv )
             break;
 
-        if ( state == STATE_DISCONNECTED && !fetch_password_try_not_to_copy_buffer(MUTABLE_HV(SvRV(self))) )
+        if ( state == STATE_DISCONNECTED && !have_password_in_memory(config) )
             break;
 
         /*warn("<%d><%s><%d>\n", maria->socket_fd, state_to_name[maria->current_state], maria->is_cont);*/
@@ -246,15 +313,13 @@ THX_do_work(pTHX_ SV* self, MariaDB_client* maria, IV event)
                 /* If we still have the password around, then we can try
                  * connecting -- otherwise, time to end this suffering.
                  */
-                if (
-                   fetch_password_try_not_to_copy_buffer(MUTABLE_HV(SvRV(self)))
-                ) {
+                if ( have_password_in_memory(config) ) {
                     state = STATE_CONNECT;
                 }
                 else {
                     if ( maria->query_sv ) {
                         err       = 1;
-                        errstring = "!!!"; /*TODO*/
+                        errstring = "Disconnected and no password in memory to reconnect, nothing to do!";
                     }
                 }
                 break;
@@ -262,13 +327,11 @@ THX_do_work(pTHX_ SV* self, MariaDB_client* maria, IV event)
             {
                 MYSQL *mysql_ret = 0;
                 if ( !maria->is_cont ) {
-                    HV *inner_self = MUTABLE_HV(SvRV(self));
-                    sql_config config = maria->config;
                     const char *password =
-                        fetch_password_try_not_to_copy_buffer(inner_self);
+                        fetch_password_try_not_to_copy_buffer(maria);
 
                     if ( !password ) {
-                        err = 1;
+                        err       = 1;
                         errstring = "No password currently in memory! Probably a good thing!";
                         break;
                     }
@@ -353,7 +416,7 @@ THX_do_work(pTHX_ SV* self, MariaDB_client* maria, IV event)
                 else {
                     /* query finished */
                     maria->is_cont = FALSE; /* hooray! */
-                    /* TODO option to mysql_store_result, state for that */
+
                     if ( maria->store_query_result ) {
                         state = STATE_STORE_RESULT;
                     }
@@ -690,6 +753,7 @@ THX_init_from_class_or_self(pTHX_ SV* class_or_self)
     }
 }
 
+/* TODO should be called positive integer */
 void
 THX_mysql_opt_integer(pTHX_ MariaDB_client* maria, HV* hv, const char* str, STRLEN str_len, enum mysql_option option )
 #define mysql_opt_integer(m, h, s, o) \
@@ -719,6 +783,17 @@ THX_unpack_config_from_hashref(pTHX_ SV* self, HV* args)
     SV** svp;
     dMARIA;
     sql_config *config = &(maria->config);
+
+    /*
+        With this code:
+            $maria->connect({user => "foo"});
+            $maria->disconnect;
+            $maria->connect({user => "bar"});
+        If we don't clear config items, we could end up
+        with a mix of both configs.  And if we don't free
+        them, we leak memory.
+    */
+    free_our_config_items(config);
 
     config->hostname     = savepv(easy_arg_fetch(args, "host",        TRUE));
     config->username     = savepv(easy_arg_fetch(args, "user",        TRUE));
@@ -890,21 +965,25 @@ CODE:
 {
     MYSQL *connect_return;
     const char* password;
-    SV *self = init_from_class_or_self(class_or_self);
+    SV *self          = init_from_class_or_self(class_or_self);
+    SV **password_svp = hv_fetchs(args, "password", FALSE);
     sql_config config;
     dMARIA;
 
+    /* might be needed if we are reconnecting */
+    maybe_init_mysql_connection(maria->mysql);
+
     if ( self == class_or_self )
-        SvREFCNT_inc(self); /* TODO: ???? */
+        SvREFCNT_inc(self); /* sigh... RETVAL will get it's refcount mortalized by the end of this sub, so... */
 
     unpack_config_from_hashref(self, args);
 
     config = maria->config;
 
-    password = fetch_password_try_not_to_copy_buffer(args);
-
-    if ( !password )
+    if ( !password_svp || !*password_svp )
         croak("No password currently in memory! Probably a good thing!");
+
+    password = fetch_pv_try_not_to_copy_buffer(*password_svp);
 
     /* blocking connect! */
     connect_return = mysql_real_connect(
@@ -943,9 +1022,7 @@ connect_start(SV* self, HV* args)
 CODE:
 {
     HV *inner_self  = MUTABLE_HV(SvRV(self));
-    SV *pw_key_sv   = newSVpvs_flags("password", SVs_TEMP);
-	HE * const he   = hv_fetch_ent(args, pw_key_sv, 1, 0);
-	SV ** const svp = he ? &HeVAL(he) : NULL;
+    SV **svp        = hv_fetchs(args, "password", FALSE);
 
     dMARIA;
 
@@ -955,30 +1032,23 @@ CODE:
     if ( maria->current_state != STATE_DISCONNECTED )
         croak("Cannot call connect_start because the current internal state says we are on %s but we need to be in %s", state_to_name[maria->current_state], state_to_name[STATE_DISCONNECTED]);
 
-    /*
-       What follows is the equivalent of
-         local $self->{password} = $args->{password};
-       We do this so that the password PV is never copied anywhere;
-       we later get it out of the string with SvPVX (if possible)
-       and pass that directly to MySQL.
-     */
-    /* TODO might be worth checking if $self->{password} already
-     * exists, since we are probably leaking that... But that
-     * would be exclusively due to people messing with the internals
-     * of the object, so, eh.
-     */
-    save_hdelete(inner_self, pw_key_sv);
-    SvREFCNT_inc(*svp);
-    (void)hv_stores(inner_self, "password", *svp);
-
     /* might be uninitialized due to a previous disconnect */
     maybe_init_mysql_connection(maria->mysql);
     unpack_config_from_hashref(self, args);
 
-    RETVAL = do_work(self, maria, 0);
+    /*
+       What follows is the equivalent of
+         local $self->{config}{password} = $args->{password};
+       We do this so that the password PV is never copied anywhere;
+       we later get it out of the string with SvPVX (if possible)
+       and pass that directly to MySQL.
+    */
 
-    /* this will be handled by the save_hdelete too, but might as well */
-    (void)hv_deletes(inner_self, "password", G_DISCARD);
+    SAVEGENERICSV(maria->config.password_temp);
+    SvREFCNT_inc(*svp);
+    maria->config.password_temp = *svp;
+
+    RETVAL = do_work(self, maria, 0);
 }
 OUTPUT: RETVAL
 
@@ -1069,8 +1139,6 @@ CODE:
     maria->query_sv = query; /* yeah, sharing the SV, for now.  See the comment above */
     SvREFCNT_inc(query);
 
-    prepare_new_result_accumulator(maria); /* TODO should this happen inside do_work? */
-
     if ( maria->is_cont ) {
         /*
          * Easy way to get here:
@@ -1096,11 +1164,12 @@ CODE:
         /* Lousy.  We did not manage to go far enough into the state machine.
          * We now have to copy the query SV -- keeping the original around is
          * NOT an option since it may be re-used by our caller
-	 * XXX TODO: could keep the original while replacing query's internals
+         * XXX TODO: could keep the original while replacing query's internals
          * to point to a COW string.  That might lead to less copying.
          */
-	SvREFCNT_dec(query); /* since we increased it before */
-	maria->query_sv = newSVsv(maria->query_sv); /* the sole refcnt will belong to us */
+        SvREFCNT_dec(query); /* since we increased it before */
+        maria->query_sv = newSVsv(maria->query_sv);
+                         /* ^ the sole refcnt will belong to us */
     }
 }
 OUTPUT: RETVAL
@@ -1215,29 +1284,7 @@ void
 disconnect(SV* self)
 CODE:
     dMARIA;
-    if ( maria->query_sv ) {
-        SvREFCNT_dec(maria->query_sv);
-        maria->query_sv = NULL;
-    }
-
-    if ( maria->res ) {
-        /* do a best attempt... */
-        int status = mysql_free_result_start(maria->res);
-        if ( status ) {
-            /* Damn.  Would've blocked trying to free the result.  Not much we can do */
-        }
-        maria->res     = NULL;
-    }
-
-    if ( maria->current_state != STATE_DISCONNECTED ) {
-        mysql_close(maria->mysql);
-        Safefree(maria->mysql);
-        maria->mysql = NULL;
-    }
-
-    maria->is_cont       = FALSE;
-    maria->current_state = STATE_DISCONNECTED;
-
+    disconnect_generic(maria);
 
 SV*
 selectall_arrayref(SV* self, SV* query_sv)
