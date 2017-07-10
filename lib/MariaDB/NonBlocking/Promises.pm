@@ -4,9 +4,13 @@ use parent 'MariaDB::NonBlocking';
 use v5.18.2; # needed for __SUB__, implies strict
 use warnings;
 
-use Sub::StrictDecl;
+BEGIN {
+    my $loaded_ok;
+    eval { require Sub::StrictDecl; $loaded_ok = 1; };
+    Sub::StrictDecl->import if $loaded_ok;
+}
 
-use Promises           ();  # for deferred
+use Promises ();  # for deferred
 
 # Better to import this, since it is a custom op
 use Ref::Util qw(is_ref is_arrayref);
@@ -19,11 +23,9 @@ use EV ();
 use MariaDB::NonBlocking ':all';
 
 sub _decide_what_watchers_we_need {
-    my ($status) = @_;
-
     my $wait_on = 0;
-    $wait_on |= EV::READ  if $status & MYSQL_WAIT_READ;
-    $wait_on |= EV::WRITE if $status & MYSQL_WAIT_WRITE;
+    $wait_on |= EV::READ  if $_[0] & MYSQL_WAIT_READ;
+    $wait_on |= EV::WRITE if $_[0] & MYSQL_WAIT_WRITE;
 
     return $wait_on;
 }
@@ -59,7 +61,6 @@ sub ____run {
                     ? $connections
                     : [$connections];
 
-    my $running  = 0;
     my (@per_query_results, @errors);
 
     my $call_start = sub {
@@ -73,7 +74,6 @@ sub ____run {
 
             local $@;
             eval {
-                $running++;
                 $wait_for = $start->($maria);
                 1;
             } or do {
@@ -87,14 +87,12 @@ sub ____run {
             return $wait_for if $wait_for;
 
             if ( !defined($wait_for) || @errors ) {
-                $running--;
                 return; # return undef, meaning nothing to do
             }
 
             if ( !$wait_for ) {
                 # Query finished immediately, so we can just
                 # run the next one
-                $running--;
                 push @per_query_results, $results->($maria);
             }
         }
@@ -157,11 +155,8 @@ sub ____run {
                 # then we just return from this loop; otherwise we
                 # reject it.
                 undef %watchers;
-                $running--;
-                if ( $running <= 0 ) {
-                    $deferred->reject("Manual cancellation, reason: $extras->{cancel}")
-                        if $deferred->is_in_progress;
-                }
+                $deferred->reject("Manual cancellation, reason: $extras->{cancel}")
+                    if $deferred->is_in_progress;
                 return;
             }
 
@@ -173,7 +168,7 @@ sub ____run {
             my (undef, $ev_event) = @_;
 
             # Always release the timer.
-            delete $watchers{$socket_fd}->{timer}; 
+            delete $watchers{$socket_fd}->{timer};
 
             my $events_for_mysql = ev_event_to_mysql_event($ev_event);
 
@@ -192,7 +187,6 @@ sub ____run {
                 last if @errors;
 
                 # Get the results
-                $running--;
                 push @per_query_results, $results->($maria);
 
                 # And schedule another!
@@ -209,7 +203,6 @@ sub ____run {
                                  # we might leak some!
                 # We got an error above.  Reject the promise and bail
                 $deferred->reject(@errors);
-                # TODO should we respect $running here?  Probably not!
                 return;
             }
 
@@ -218,13 +211,14 @@ sub ____run {
             # so decrease the condvar counter
             if ( !$wait_for ) {
                 delete $watchers{$socket_fd}; # BOI!!
-                if ( $running <= 0 ) {
+                if ( !keys %watchers ) {
                     # Ran all the queries! We can resolve and go home
                     $deferred->resolve(\@per_query_results);
                     return;
                 }
                 # Another connection is still running.  The last query
                 # must resolve.
+                return;
             }
             else {
                 if ( $wait_for != $previous_wait_for ) {
@@ -287,7 +281,7 @@ sub ____run {
     }
 
     my $promise = $deferred->promise;
-    if ( !$running ) {
+    if ( !keys %watchers ) {
         # All queries on all connections finished immediately.
         # So reject or resolve as necessary
         if ( @errors ) {
