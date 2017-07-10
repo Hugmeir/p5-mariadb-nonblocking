@@ -1004,6 +1004,17 @@ CODE:
     SvREFCNT_inc(query);
 
     if ( maria->is_cont ) {
+        if ( maria->current_state == STATE_QUERY ) {
+            /*
+             * How we get here:
+             *  $maria->run_query_start("select 1");
+             *  $maria->run_query_start("select 2");
+             * This is a no-go, and usually happens when a
+             * handle is used from multiple places.
+             */
+             croak("Cannot start running a second query while we are still completing the first!");
+        }
+
         /*
          * Easy way to get here:
          *      $maria->connect_start(...);
