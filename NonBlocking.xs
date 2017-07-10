@@ -996,6 +996,17 @@ CODE:
     if ( maria->query_sv )
         croak("Query already waiting to be run!!!!");
 
+    if ( maria->current_state == STATE_QUERY ) {
+        /*
+         * How we get here:
+         *  $maria->run_query_start("select 1");
+         *  $maria->run_query_start("select 2");
+         * This is a no-go, and usually happens when a
+         * handle is used from multiple places.
+         */
+        croak("Cannot start running a second query while we are still completing the first!");
+    }
+
     /* See if we can cheat!  We don't need to copy the query's buffer yet --
      * if we do into the state machine and manage to run mysql_real_query_start,
      * we won't need to copy this at all!
@@ -1004,17 +1015,6 @@ CODE:
     SvREFCNT_inc(query);
 
     if ( maria->is_cont ) {
-        if ( maria->current_state == STATE_QUERY ) {
-            /*
-             * How we get here:
-             *  $maria->run_query_start("select 1");
-             *  $maria->run_query_start("select 2");
-             * This is a no-go, and usually happens when a
-             * handle is used from multiple places.
-             */
-             croak("Cannot start running a second query while we are still completing the first!");
-        }
-
         /*
          * Easy way to get here:
          *      $maria->connect_start(...);
