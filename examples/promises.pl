@@ -1,219 +1,88 @@
-use v5.18.1;
+#!perl
+use v5.10.1;
+use strict;
 use warnings;
 
-use blib;
-use MariaDB::NonBlocking ':all';
-
-use EV;
-use AnyEvent;
-use Promises qw/collect deferred/;
-
+use Devel::Peek;
 use Data::Dumper;
 
-AnyEvent->condvar; # Initialize
+use blib;
+use Promises qw/collect/;
+use Scalar::Util qw/weaken/;
+use MariaDB::NonBlocking::Promises;
 
-sub _decide_what_watchers_we_need {
-    my ($status) = @_;
+sub MariaDB::NonBlocking::Promises::DESTROY { say STDERR "$_[0]: OH HAI"; }
 
-    my $wait_on = 0;
-    $wait_on |= EV::READ  if $status & MYSQL_WAIT_READ;
-    $wait_on |= EV::WRITE if $status & MYSQL_WAIT_WRITE;
+my @queries = (
+    "SELECT CONNECTION_ID(), RAND(6959)",
+    "select coord(), rand(464)",
+    "select 1, rand(464)",
+);
 
-    return $wait_on;
-}
 
-sub ev_event_to_mysql_event {
-    return MYSQL_WAIT_TIMEOUT
-        if $_[0] & EV::TIMER;
+my @promises;
+my @all_connections;
+my $extras = {}; # Used to cancel all promises in case of an error
+for (1..1) {
+    my $init_connections = [ map MariaDB::NonBlocking::Promises->init, 1..2 ];
+    say join "\n", @$init_connections;
 
-    my $events = 0;
-    $events |= MYSQL_WAIT_READ  if $_[0] & EV::READ;
-    $events |= MYSQL_WAIT_WRITE if $_[0] & EV::WRITE;
+    # Used during error handling to disconnect everything early
+    push @all_connections, $init_connections;
 
-    return $events;
-}
+    my $handle_errors = sub {
+        # If we already handled an error then we have nothing to do
+        return if exists $extras->{cancel};
+        $extras->{cancel} = "Error in related promise";
 
-sub run_queries_promise {
-    my @queries  = @_;
+        # Disconnect should not die -- if it does, then
+        # that takes precedence to whatever else happened!
+        $_->disconnect for map @{$_//[]}, @all_connections;
+        @all_connections = ();
+        # ^ At this point, the connections for this promise will
+        # be freed.
 
-    my @connections = map MariaDB::NonBlocking->init(), 1..3;
-
-    my $connect_args = {
-        host         => 'localhost',
-        user         => 'root',
-        port         => 0,
-        password     => "",
-        database     => undef,
-        mysql_socket => undef,
-        mysql_use_results => 1,
-#        ssl => {
-#            ca     => '',
-#        },
+        my $e = $_[0];
+        die $e; # rethrow
     };
 
-    my @promises;
-    my (@query_results, @errors);
-    foreach my $maria ( @connections ) {
-        last if !@queries; # Huh.
-
-        # Note: we don't wait for this to finish.  When we later
-        # call ->run_query_start, that will internally call
-        # the ->connect_cont with the event as 0 -- meaning
-        # that nothing happened.
-        $maria->connect_start($connect_args);
-
-        my $deferred = deferred;
-        my $promise  = $deferred->promise;
-        push @promises, $promise;
-
-        my $socket_fd = $maria->mysql_socket_fd;
-
-        my $run_query = sub {
-            return unless @queries;
-            my $query = pop @queries;
-            my $wait_for;
-            local $@;
-            eval {
-                $wait_for = $maria->run_query_start($query);
-                1;
-            } or do {
-                my $e = $@ || 'zombie error';
-                push @errors, $e;
-            };
-
-            return if @errors;
-
-            if ( !$wait_for ) {
-                push @query_results, $maria->query_results;
-                goto &{ __SUB__() }; # tail call optimization
-            }
-
-            return $wait_for;
-        };
-
-        my %watchers;
-        my $ev_mask;
-        my $cb = sub {
-            my (undef, $ev_event) = @_;
-
-            delete $watchers{timer}; # Always release the timer.
-
-            my $events_for_mysql = ev_event_to_mysql_event($ev_event);
-
-            my $wait_for;
-            local $@;
-            eval {
-                $wait_for = $maria->run_query_cont($events_for_mysql);
-                1;
-            } or do {
-                my $e = $@ || 'zombie error';
-                push @errors, $e;
-            };
-
-            if ( !$wait_for && !@errors ) { # query we were waiting on finished!
-                do {
-                    # Get the results
-                    push @query_results, $maria->query_results;
-
-                    # And schedule another!
-                    $wait_for = $run_query->();
-                    # Loop will keep going until we either run a query
-                    # we need to block on, in which case $wait_for will
-                    # be true, or we exhaust all @queries, in which case
-                    # joy to the world.
-                } while (!$wait_for && @queries && !@errors);
-            }
-
-            # If we still don't need to wait for anything, that
-            # means we are done with all queries for this dbh,
-            # so decrease the condvar counter
-            if ( !$wait_for || @errors ) {
-                undef %watchers; # BOI!!
-                if ( @errors ) {
-                    $deferred->reject(@errors);
-                }
-                else {
-                    $deferred->resolve();
-                }
-            }
-            else {
-                my $new_ev_mask = _decide_what_watchers_we_need($wait_for);
-                if ( $new_ev_mask != $ev_mask ) {
-                    # Server wants us to wait on something else, so
-                    # we can't reuse the previous watcher.
-                    # e.g. we had a watcher waiting on the socket
-                    # being readable, but we need to wait for it to
-                    # become writeable (or both) instead.
-                    # This almost never happens.
-                    delete $watchers{io};
-                    $ev_mask = $new_ev_mask;
-                    $watchers{io} = EV::io(
-                                        $socket_fd,
-                                        $ev_mask,
-                                        __SUB__,
-                                      );
-                }
-
-                if ( $wait_for & MYSQL_WAIT_TIMEOUT ) {
-                    my $timeout_ms = $maria->get_timeout_value_ms();
-                    # Bug in the client lib makes the no-timeout case come
-                    # back as 0 timeout.  So only create the timer if we
-                    # actually have a timeout.
-                    # https://lists.launchpad.net/maria-developers/msg09971.html
-                    $watchers{timer} = EV::timer(
-                                            # EV wants (fractional) seconds
-                                            $timeout_ms/1000,
-                                            0, # do not repeat
-                                            __SUB__,
-                                       ) if $timeout_ms;
-                }
-            }
-            return;
-        };
-    
-        my $wait_for = $run_query->();
-
-        if ( !$wait_for ) {
-            $deferred->resolve();
-            next;
-        }
-
-        $ev_mask = _decide_what_watchers_we_need($wait_for);
-        $watchers{io} = EV::io(
-            $socket_fd,
-            $ev_mask,
-            $cb,
-        );
-    }
-    return collect(@promises)->then(
-        sub { # resolve cb, queries were all successful!
-            # Just return the aggregated results
-            return @query_results;
+    push @promises, MariaDB::NonBlocking::Promises::connect(
+        $init_connections,
+        {
+            host     => "127.0.0.1",
+            user     => "root",
+            password => "",
         },
-        # no reject callback, let the caller deal with errors
+        $extras,
+    )->then(
+        sub {
+            return if exists $extras->{cancel};
+
+            my ($connections) = @_;
+
+            # returns a promise that will be resolved once the
+            # query is run once on each connection
+            my $promise
+                = MariaDB::NonBlocking::Promises::run_multiple_queries(
+                    $connections,
+                    [@queries],
+                    $extras,
+                )->catch($handle_errors);
+            return $promise;
+        },
+        $handle_errors
     );
 }
 
-my @queries = (
-    q{SELECT REPEAT("pity da foo", 5634), RAND()*100}
-) x 6;
-#    $queries[3] = 'SELECT REPEAT(';
+{
+    use AnyEvent;
+    my $cv = AnyEvent->condvar;
+    collect(@promises)->then(
+        sub { say "hello! ", Dumper(\@_); $cv->send },
+        sub { say "error! @_";            $cv->send },
+    );
+    $cv->recv;
+}
+say "promise wait END";
 
-my $promise = run_queries_promise(@queries);
-
-my $cv = AnyEvent->condvar;
-say "Going to wait on the promise!";
-$promise->then(
-    sub {
-        say "Done!";
-        say Dumper([map $_->[0][-1], @_]);
-        $cv->send();
-    },
-    sub {
-        say "Reject!";
-        say Dumper([map $_->[0][-1], @_]);
-        $cv->send;
-    },
-);
-$cv->recv();
-
+say "END";
