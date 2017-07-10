@@ -6,7 +6,7 @@ use warnings;
 
 =head1 NAME
 
-MariaDB::NonBlocking - The great new MariaDB::NonBlocking!
+MariaDB::NonBlocking - Nonblocking connections to MySQL using libmariadbclient
 
 =head1 VERSION
 
@@ -14,10 +14,10 @@ Version 0.01
 
 =cut
 
-use Exporter 'import';
-use XSLoader;
+use Exporter qw(import);
+use XSLoader qw();
 
-our $VERSION = '0.01';
+BEGIN { our $VERSION = '0.01' };
 XSLoader::load(__PACKAGE__);
 
 our @EXPORT_OK = qw/
@@ -31,6 +31,47 @@ our %EXPORT_TAGS = (
 );
 
 =head1 SYNOPSIS
+
+A very thin wrapper around the MariaDB non-blocking library to MySQL.
+You need to implement the eventloop around it yourself!
+
+    use MariaDB::NonBlocking;
+    my $maria = MariaDB::NonBlocking->init;
+
+    my $wait_for = $maria->connect_start({
+                    host        => ...,
+                    port        => ...,
+                    user        => ...,
+                    password    => ...,
+                    database    => ...,
+                    unix_socket => ...,
+
+                    charset     => ...,
+
+                    mysql_use_results  => undef, # not very useful yet
+
+                    mysql_connect_timeout => ...,
+                    mysql_write_timeout   => ...,
+                    mysql_read_timeout    => ...,
+
+                    mysql_init_command => ...,
+                    mysql_compression  => ...,
+
+                    # NOT TESTED, LIKELY TO SEGFAULT, DO NOT USE YET:
+                    ssl => {
+                        key    => ...,
+                        cert   => ...,
+                        ca     => ...,
+                        capath => ...,
+                        cipher => ...,
+                        reject_unauthorized => 1,
+                    },
+               });
+
+    # Your event loop here
+    while ( $wait_for ) {
+        
+    }
 
 Quick summary of what the module does.
 

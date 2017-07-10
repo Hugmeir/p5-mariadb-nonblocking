@@ -53,7 +53,7 @@ typedef struct MariaDB_client {
     MYSQL*     mysql;
     MYSQL_RES* res;
 
-    sql_config config;
+    sql_config* config;
 
     SV* query_results;
     SV* query_sv;
@@ -97,6 +97,8 @@ enum color { NAMES STATE_END };
 const char * const state_to_name[] = { NAMES };
 #undef C
 
+const char* const cont_to_name[] = { "cont", "run_query_cont", "ping_cont", "connect_cont" };
+
 void
 THX_free_our_config_items(pTHX_ sql_config* config)
 #define free_our_config_items(c) THX_free_our_config_items(aTHX_ c)
@@ -118,15 +120,6 @@ void
 THX_disconnect_generic(pTHX_ MariaDB_client* maria)
 #define disconnect_generic(maria) THX_disconnect_generic(aTHX_ maria)
 {
-    if ( maria->mysql && maria->current_state != STATE_DISCONNECTED ) {
-        mysql_close(maria->mysql);
-        Safefree(maria->mysql);
-        maria->mysql = NULL;
-    }
-
-    maria->is_cont       = FALSE;
-    maria->current_state = STATE_DISCONNECTED;
-
     if ( maria->query_sv ) {
         SvREFCNT_dec(maria->query_sv);
         maria->query_sv = NULL;
@@ -135,12 +128,21 @@ THX_disconnect_generic(pTHX_ MariaDB_client* maria)
     if ( maria->res ) {
         /* do a best attempt... */
         int status = mysql_free_result_start(maria->res);
+        maria->res = NULL; /* memory might leak here if status != 0 */
         if ( status ) {
-            /* TODO leaking memory */
             /* Damn.  Would've blocked trying to free the result.  Not much we can do */
+            croak("Could not free statement handle without blocking.");
         }
-        maria->res     = NULL;
     }
+
+    if ( maria->mysql ) {
+        mysql_close(maria->mysql);
+        Safefree(maria->mysql);
+        maria->mysql = NULL;
+    }
+
+    maria->is_cont       = FALSE;
+    maria->current_state = STATE_DISCONNECTED;
 
     return;
 }
@@ -148,23 +150,27 @@ THX_disconnect_generic(pTHX_ MariaDB_client* maria)
 static int
 free_mariadb_handle(pTHX_ SV* sv, MAGIC *mg)
 {
-
     MariaDB_client* maria = (MariaDB_client*)mg->mg_ptr;
-    sql_config config = maria->config;
+    sql_config *config;
 
-    if ( maria->destroyed ) {
+    if ( !maria || maria->destroyed ) {
         return 0;
     }
+
+    config = maria->config;
 
     maria->destroyed = 1;
 
     disconnect_generic(maria);
 
     /* Free all the config items we may have allocated */
-    free_our_config_items(&config);
+    free_our_config_items(config);
 
+    Safefree(maria->config); /* free the memory we Newxz'd before */
+    maria->config = NULL;
     Safefree(maria); /* free the memory we Newxz'd before */
     /* mg will be freed by our caller */
+    mg->mg_ptr = NULL;
 
     return 0;
 }
@@ -203,7 +209,7 @@ THX_fetch_password_try_not_to_copy_buffer(pTHX_ MariaDB_client *maria)
 #define fetch_password_try_not_to_copy_buffer(a) \
     THX_fetch_password_try_not_to_copy_buffer(aTHX_ a)
 {
-    return fetch_pv_try_not_to_copy_buffer(maria->config.password_temp);
+    return fetch_pv_try_not_to_copy_buffer(maria->config->password_temp);
 }
 
 int
@@ -274,18 +280,30 @@ THX_usual_post_connect_shenanigans(pTHX_ SV* self)
     return;
 }
 
+#define maybe_init_mysql_connection(mysql) STMT_START {           \
+    if ( !mysql ) {                                               \
+        my_bool reconnect = 0;                                    \
+        Newxz(mysql, 1, MYSQL);                                   \
+        mysql_init(mysql);                                        \
+        mysql_options(mysql, MYSQL_OPT_NONBLOCK, 0);              \
+        mysql_options(mysql, MYSQL_OPT_RECONNECT, &reconnect);    \
+    }                                                             \
+} STMT_END
+
+
 int
-THX_do_work(pTHX_ SV* self, MariaDB_client* maria, IV event)
-#define do_work(self, maria, event) THX_do_work(aTHX_ self, maria, event)
+THX_do_work(pTHX_ SV* self, IV event)
+#define do_work(self, event) THX_do_work(aTHX_ self, event)
 {
+    dMARIA;
     int err             = 0;
     int status          = 0;
     int state           = maria->current_state;
     int state_for_error = STATE_STANDBY; /* query errors */
-    sql_config config   = maria->config;
+    sql_config *config   = maria->config;
     const char* errstring;
 
-#define have_password_in_memory(config) (config.password_temp && SvOK(config.password_temp))
+#define have_password_in_memory(maria) (maria && maria->config && maria->config->password_temp && SvOK(maria->config->password_temp))
 
     while ( 1 ) {
         if ( err )
@@ -297,7 +315,7 @@ THX_do_work(pTHX_ SV* self, MariaDB_client* maria, IV event)
         if ( state == STATE_STANDBY && !maria->query_sv )
             break;
 
-        if ( state == STATE_DISCONNECTED && !have_password_in_memory(config) )
+        if ( state == STATE_DISCONNECTED && !have_password_in_memory(maria) )
             break;
 
         /*warn("<%d><%s><%d>\n", maria->socket_fd, state_to_name[maria->current_state], maria->is_cont);*/
@@ -313,7 +331,7 @@ THX_do_work(pTHX_ SV* self, MariaDB_client* maria, IV event)
                 /* If we still have the password around, then we can try
                  * connecting -- otherwise, time to end this suffering.
                  */
-                if ( have_password_in_memory(config) ) {
+                if ( have_password_in_memory(maria) ) {
                     state = STATE_CONNECT;
                 }
                 else {
@@ -339,15 +357,23 @@ THX_do_work(pTHX_ SV* self, MariaDB_client* maria, IV event)
                     status = mysql_real_connect_start(
                                  &mysql_ret,
                                  maria->mysql,
-                                 config.hostname,
-                                 config.username,
+                                 maria->config->hostname,
+                                 maria->config->username,
                                  password,
-                                 config.database,
-                                 config.port,
-                                 config.unix_socket,
-                                 config.client_opts
+                                 maria->config->database,
+                                 maria->config->port,
+                                 maria->config->unix_socket,
+                                 /* XXX TODO: CLIENT_REMEMBER_OPTIONS
+                                  * without it, a connect_cont following
+                                  * an error -- like a bad password --
+                                  * will cause segfaults, presumably because
+                                  * the connection won't have the async
+                                  * context set.
+                                  */
+                                 CLIENT_REMEMBER_OPTIONS
+                                    |
+                                 maria->config->client_opts
                             );
-
                     maria->socket_fd = mysql_get_socket(maria->mysql);
                     (void)store_in_self(
                         "mysql_socket_fd",
@@ -627,95 +653,6 @@ THX_do_work(pTHX_ SV* self, MariaDB_client* maria, IV event)
     return status;
 }
 
-IV
-THX_run_blocking_query(pTHX_ MariaDB_client* maria, SV* query_sv, bool want_results)
-#define run_blocking_query(x,y,z) THX_run_blocking_query(aTHX_ x,y,z)
-{
-    IV rows = -1;
-    /* ^ default return value: we have no clue what the rows affected was */
-    int err = 0;
-    STRLEN query_len;
-    const char* query_pv = SvPV(query_sv, query_len);
-
-    if ( maria->current_state != STATE_STANDBY )
-        croak("Cannot run a blocking query on this handle, because the internal state is on %s", state_to_name[maria->current_state]);
-
-    err = mysql_real_query( maria->mysql, query_pv, query_len );
-
-    if ( err ) {
-        croak("%s", mysql_error(maria->mysql)); /* mysql_errstring */
-    }
-
-    maria->res = mysql_store_result(maria->mysql);
-
-    prepare_new_result_accumulator(maria);
-
-    if ( maria->res ) {
-        if ( want_results ) {
-            MYSQL_ROW row;
-            while ((row = mysql_fetch_row(maria->res)))
-                add_row_to_results(maria, row);
-        }
-        rows = mysql_affected_rows(maria->mysql);
-        mysql_free_result(maria->res);
-        maria->res = NULL;
-    }
-    else if ( mysql_field_count(maria->mysql) == 0 ) {
-        /* query succeeded but returned no data */
-        rows = mysql_affected_rows(maria->mysql);
-    }
-    else {
-        /* Error! */
-        croak("%s", mysql_error(maria->mysql));
-    }
-
-    return rows;
-}
-
-#define maybe_init_mysql_connection(mysql) STMT_START {                     \
-    if ( !mysql ) {                                                       \
-        my_bool reconnect = 0;                                              \
-        Newxz(mysql, 1, MYSQL); \
-        mysql_init(mysql);                                               \
-        mysql_options(mysql, MYSQL_OPT_NONBLOCK, 0);                     \
-        mysql_options(mysql, MYSQL_OPT_RECONNECT, &reconnect);    \
-    }                                                                       \
-} STMT_END
-
-SV*
-THX_init_self(pTHX_ SV* classname)
-#define init_self(c) THX_init_self(aTHX_ c)
-{
-    SV* self;
-
-    MariaDB_client *maria;
-    Newxz(maria, 1, MariaDB_client);
-
-    maria->query_results = NULL;
-    maria->current_state = STATE_DISCONNECTED;
-    maria->socket_fd     = -1;
-    maria->thread_id     = -1;
-    maria->store_query_result = TRUE;
-
-    maybe_init_mysql_connection(maria->mysql);
-
-    /* create a reference to a hash, bless into $classname, then add the
-     * magic we need
-     */
-    self = newRV_noinc(MUTABLE_SV(newHV()));
-    sv_bless(self, gv_stashsv(classname, GV_ADD));
-    sv_magicext(
-        SvRV(self),
-        SvRV(self),
-        PERL_MAGIC_ext,
-        &maria_vtable,
-        (char*) maria,
-        0
-    );
-
-    return self;
-}
-
 const char*
 THX_easy_arg_fetch(pTHX_ HV *hv, char * pv, STRLEN pv_len, bool required)
 #define easy_arg_fetch(hv, s, b) THX_easy_arg_fetch(aTHX_ hv, s, sizeof(s)-1, b)
@@ -734,23 +671,6 @@ THX_easy_arg_fetch(pTHX_ HV *hv, char * pv, STRLEN pv_len, bool required)
         croak("No %s given to ->connect / ->connect_start!", pv);
     }
     return res;
-}
-
-SV*
-THX_init_from_class_or_self(pTHX_ SV* class_or_self)
-#define init_from_class_or_self(c) THX_init_from_class_or_self(aTHX_ c)
-{
-    if (
-           sv_isobject(class_or_self) && SvTYPE(SvRV(class_or_self)) == SVt_PVHV
-        && mg_findext(SvRV(class_or_self), PERL_MAGIC_ext, &maria_vtable) != 0
-    ) {
-        /* called as $obj->connect */
-        return class_or_self;
-    }
-    else {
-        /* called as Class->connect, need to create an object */
-        return init_self(class_or_self);
-    }
 }
 
 /* TODO should be called positive integer */
@@ -782,7 +702,7 @@ THX_unpack_config_from_hashref(pTHX_ SV* self, HV* args)
 {
     SV** svp;
     dMARIA;
-    sql_config *config = &(maria->config);
+    sql_config *config = maria->config;
 
     /*
         With this code:
@@ -956,57 +876,36 @@ BOOT:
 SV*
 init(SV* classname)
 CODE:
-RETVAL = init_self(classname);
-OUTPUT: RETVAL
-
-SV*
-connect(SV* class_or_self, HV* args)
-CODE:
 {
-    MYSQL *connect_return;
-    const char* password;
-    SV *self          = init_from_class_or_self(class_or_self);
-    SV **password_svp = hv_fetchs(args, "password", FALSE);
-    sql_config config;
-    dMARIA;
+    SV* self;
 
-    /* might be needed if we are reconnecting */
+    MariaDB_client *maria;
+    sql_config *config;
+    Newxz(maria, 1, MariaDB_client);
+    Newxz(config, 1, sql_config);
+
+    maria->config        = config;
+    maria->query_results = NULL;
+    maria->current_state = STATE_DISCONNECTED;
+    maria->socket_fd     = -1;
+    maria->thread_id     = -1;
+    maria->store_query_result = TRUE;
+
     maybe_init_mysql_connection(maria->mysql);
 
-    if ( self == class_or_self )
-        SvREFCNT_inc(self); /* sigh... RETVAL will get it's refcount mortalized by the end of this sub, so... */
-
-    unpack_config_from_hashref(self, args);
-
-    config = maria->config;
-
-    if ( !password_svp || !*password_svp )
-        croak("No password currently in memory! Probably a good thing!");
-
-    password = fetch_pv_try_not_to_copy_buffer(*password_svp);
-
-    /* blocking connect! */
-    connect_return = mysql_real_connect(
-                        maria->mysql,
-                        config.hostname,
-                        config.username,
-                        password,
-                        config.database,
-                        config.port,
-                        config.unix_socket,
-                        config.client_opts
-                    );
-
-    if ( !connect_return )
-        croak("Failed to connect to MySQL: %s\n", mysql_error(maria->mysql));
-
-    maria->socket_fd = mysql_get_socket(maria->mysql);
-    (void)store_in_self(
-        "mysql_socket_fd",
-        newSViv(maria->socket_fd)
+    /* create a reference to a hash, bless into $classname, then add the
+     * magic we need
+     */
+    RETVAL = newRV_noinc(MUTABLE_SV(newHV()));
+    sv_bless(RETVAL, gv_stashsv(classname, GV_ADD));
+    sv_magicext(
+        SvRV(RETVAL),
+        SvRV(RETVAL),
+        PERL_MAGIC_ext,
+        &maria_vtable,
+        (char*) maria,
+        0
     );
-    usual_post_connect_shenanigans(self);
-    RETVAL = self;
 }
 OUTPUT: RETVAL
 
@@ -1044,29 +943,10 @@ CODE:
        and pass that directly to MySQL.
     */
 
-    SAVEGENERICSV(maria->config.password_temp);
-    SvREFCNT_inc(*svp);
-    maria->config.password_temp = *svp;
+    SAVEGENERICSV(maria->config->password_temp);
+    maria->config->password_temp = SvREFCNT_inc(*svp);
 
-    RETVAL = do_work(self, maria, 0);
-}
-OUTPUT: RETVAL
-
-IV
-connect_cont(SV* self, ...)
-CODE:
-{
-    dMARIA;
-    IV event = 0;
-    /* state here really should be STATE_CONNECT */
-    if ( !maria->is_cont )
-        croak("Calling connect_cont, but the internal state does not match up to that");
-    if ( items > 1 ) {
-        if ( ST(1) == self )
-            croak("Called $self->connect_cont($self), wtf?");
-        event = SvIV(ST(1));
-    }
-    RETVAL = do_work(self, maria, event);
+    RETVAL = do_work(self, 0);
 }
 OUTPUT: RETVAL
 
@@ -1088,24 +968,8 @@ CODE:
     }
     else {
         maria->current_state = STATE_PING;
-        RETVAL = do_work(self, maria, 0);
+        RETVAL = do_work(self, 0);
     }
-}
-OUTPUT: RETVAL
-
-IV
-ping_cont(SV* self, ...)
-CODE:
-{
-    dMARIA;
-    IV event = 0;
-    if ( items > 1 ) {
-        if ( ST(1) == self )
-            croak("Called $self->connect_cont($self), wtf?");
-        event = SvIV(ST(1));
-    }
-
-    RETVAL = do_work(self, maria, event);
 }
 OUTPUT: RETVAL
 
@@ -1157,7 +1021,7 @@ CODE:
         RETVAL = maria->last_status;
     }
     else {
-        RETVAL = do_work(self, maria, 0);
+        RETVAL = do_work(self, 0);
     }
 
     if ( maria->query_sv ) {
@@ -1184,14 +1048,18 @@ CODE:
 OUTPUT: RETVAL
 
 IV
-run_query_cont(SV* self, ...)
+cont(SV* self, ...)
+ALIAS:
+    run_query_cont = 1
+    ping_cont      = 2
+    connect_cont   = 3
 CODE:
 {
     dMARIA;
     IV event = 0;
 
     if ( !maria->is_cont ) {
-        croak("Calling run_query_cont, but the internal state does not match up to that: <%d><%s>", maria->socket_fd, state_to_name[maria->current_state]);
+        croak("Calling ->%s, but we are not currently waiting for the server. Current state is %s", cont_to_name[ix], state_to_name[maria->current_state]);
     }
 
     /*
@@ -1200,10 +1068,13 @@ CODE:
      * the socket.  If not passed in, the library will poll() on
      * the socket.
      */
-    if ( items > 1 )
+    if ( items > 1 ) {
+        if ( ST(1) == self )
+            croak("Called $self->%s($self), that is just wrong", cont_to_name[ix]);
         event = SvIV(ST(1));
+    }
 
-    RETVAL = do_work(self, maria, event);
+    RETVAL = do_work(self, event);
 }
 OUTPUT: RETVAL
 
@@ -1286,22 +1157,4 @@ CODE:
     dMARIA;
     disconnect_generic(maria);
 
-SV*
-selectall_arrayref(SV* self, SV* query_sv)
-CODE:
-{
-    dMARIA;
-    (void)run_blocking_query(maria, query_sv, TRUE);
-    RETVAL = newRV(MUTABLE_SV(maria->query_results));
-}
-OUTPUT: RETVAL
 
-
-IV
-do(SV* self, SV* query_sv)
-CODE:
-{
-    dMARIA;
-    RETVAL = run_blocking_query(maria, query_sv, FALSE);
-}
-OUTPUT: RETVAL
