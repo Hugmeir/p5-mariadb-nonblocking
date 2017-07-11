@@ -4,7 +4,7 @@ use strict;
 use warnings;
 
 use blib;
-use Promises ();
+use Promises qw(collect);
 use MariaDB::NonBlocking::Promises;
 
 # methinks collect() has a (doc?) bug
@@ -13,17 +13,18 @@ use MariaDB::NonBlocking::Promises;
 # In the same vein as collect(), but will *not* immediately
 # reject the promise if any single one fails.
 # Useful when we want all connections to gracefully stop
-# their processing.
+# their processing before moving on;  this ensures that
+# the handles can be safely reused
 sub collect_all_resolve_or_reject {
-    my $deferred  = Promises::deferred;
     my $remaining = @_;
+    my $deferred  = Promises::deferred;
     my (@results, @errors);
 
     foreach my $idx ( 0..$#_ ) {
         $_[$idx]->then(
             sub {
                 $remaining--;
-                $results[$idx] = \@_;
+                $results[$idx] = \@_ unless @errors;
                 if ( !$remaining ) {
                     @errors
                         ? $deferred->reject(@errors)
@@ -33,6 +34,8 @@ sub collect_all_resolve_or_reject {
             sub {
                 $remaining--;
                 push @errors, @_;
+                @results = (); # no need to keep these around anymore,
+                               # since we won't use them.
                 $deferred->reject(@errors) if !$remaining;
             }
         )
@@ -50,26 +53,54 @@ sub collect_all_resolve_or_reject {
 my @queries = (
     [
         "SELECT CONNECTION_ID(), RAND(6959)",
-        "select doof(), rand(464)",
+        "select 12, rand(464)",
         "select 1, rand(464)",
     ],
     [
-        "select sleep(3)"
+        "select sleep(1)"
     ],
     [
-        "select sleep(4)"
+        "select sleep(1)"
     ],
 );
 
-my @promises;
-my @all_connections;
-my $extras = {}; # Used to cancel all promises in case of an error
-for (1..3) {
-    # Create 9 connections to mysql (3 promises with 3 connections each)
-    my $init_connections = [ map MariaDB::NonBlocking::Promises->init, 1..1 ];
+sub run_queries {
+    my @all_connections; # used to disconnect all handles in case of an error
+    my $extras = {}; # Used to cancel all promises in case of an error
 
-    # Used during error handling to disconnect everything early
-    push @all_connections, $init_connections;
+    my @promises;
+    for (1..3) {
+        # Create 9 connections to mysql (3 promises with 3 connections each)
+        my $connections = [ map MariaDB::NonBlocking::Promises->init, 1..2 ];
+
+        # Used during error handling to disconnect everything early
+        push @all_connections, $connections;
+
+        push @promises, MariaDB::NonBlocking::Promises::connect(
+            $connections,
+            {
+                host     => "127.0.0.1",
+                user     => "root",
+                password => "",
+            },
+            $extras,
+        )->then(
+            sub {
+                return if exists $extras->{cancel}; # Another connection died
+
+                my ($connections) = @_;
+
+                # Return a promise that will be resolved once all the
+                # queries are run; the resolve handler will then get
+                # the per-query results
+                return MariaDB::NonBlocking::Promises::run_multiple_queries(
+                        $connections,
+                        pop @queries,
+                        $extras,
+                       );
+            },
+        );
+    }
 
     my $handle_errors = sub {
         # If we already handled an error then we have nothing to do
@@ -92,42 +123,21 @@ for (1..3) {
         die $_[0]; # rethrow
     };
 
-    push @promises, MariaDB::NonBlocking::Promises::connect(
-        $init_connections,
-        {
-            host     => "127.0.0.1",
-            user     => "root",
-            password => "",
-        },
-        $extras,
-    )->then(
-        sub {
-            return if exists $extras->{cancel}; # Another connection died, stawp
-
-            my ($connections) = @_;
-
-            # Return a promise that will be resolved once all the
-            # queries are run; the resolve handler will then get
-            # the per-query results
-            return MariaDB::NonBlocking::Promises::run_multiple_queries(
-                    $connections,
-                    pop @queries,
-                    $extras,
-                   );
-        },
-    )->catch($handle_errors);
+    return collect_all_resolve_or_reject(
+                map $_->catch($handle_errors), @promises
+           );
 }
 
 {
     # Wait for the promises to be fulfilled.
     use AnyEvent;
     my $cv = AnyEvent->condvar;
-    collect_all_resolve_or_reject(@promises)->then(
-        sub { @all_connections = (); use Data::Dumper; say Dumper(\@_); $cv->send },
-        sub { say "Error! @_"; $cv->send },
+    run_queries()->then(
+        sub { use Data::Dumper; say STDERR Dumper(\@_); $cv->send },
+        sub { say STDERR "Error! @_"; $cv->send },
     );
     $cv->recv;
-    @promises = ();
+    say STDERR "Done waiting";
 }
 
 say "END";
