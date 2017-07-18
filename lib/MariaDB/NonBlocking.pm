@@ -33,7 +33,12 @@ our %EXPORT_TAGS = (
 =head1 SYNOPSIS
 
 A very thin wrapper around the MariaDB non-blocking library to MySQL.
-You need to implement the eventloop around it yourself!
+You probably want to check out L<MariaDB::NonBlocking::Promises> for
+something that you can actually use for querying!
+
+This class provides access to the basic functionality, so
+without adding some sort of eventloop around it it won't be
+very useful.
 
     use MariaDB::NonBlocking;
     my $maria = MariaDB::NonBlocking->init;
@@ -73,35 +78,25 @@ You need to implement the eventloop around it yourself!
         
     }
 
-Quick summary of what the module does.
-
-Perhaps a little code snippet.
-
-    use MariaDB::NonBlocking;
-
-    my $foo = MariaDB::NonBlocking->new();
-    ...
-
 =head1 EXPORT
 
-A list of functions that can be exported.  You can delete this section
-if you don't export anything, such as for a purely object-oriented module.
+Four constants are optionally exported.  They can be logically-and'd with
+the status (C<$wait_for>) returned by the C<_start> and C<_cont> methods,
+to figure out what events the library wants us to wait on.
+
+They should also be used to communicate with the library what events happened.
+
+=head2 MYSQL_WAIT_READ
+
+=head2 MYSQL_WAIT_WRITE
+
+=head2 MYSQL_WAIT_EXCEPT
+
+=head2 MYSQL_WAIT_TIMEOUT
 
 =head1 SUBROUTINES/METHODS
 
-=head2 function1
-
-=cut
-
-sub function1 {
-}
-
 =head2 function2
-
-=cut
-
-sub function2 {
-}
 
 =head1 AUTHOR
 
@@ -112,9 +107,6 @@ Brian Fraser, C<< <fraserbn at gmail.com> >>
 Please report any bugs or feature requests to C<bug-mariadb-nonblocking at rt.cpan.org>, or through
 the web interface at L<http://rt.cpan.org/NoAuth/ReportBug.html?Queue=MariaDB-NonBlocking>.  I will be notified, and then you'll
 automatically be notified of progress on your bug as I make changes.
-
-
-
 
 =head1 SUPPORT
 
