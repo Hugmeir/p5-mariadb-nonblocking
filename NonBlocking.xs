@@ -917,6 +917,13 @@ CODE:
 OUTPUT: RETVAL
 
 IV
+mysql_warning_count(SV* self)
+CODE:
+    dMARIA;
+    RETVAL = mysql_warning_count(maria->mysql);
+OUTPUT: RETVAL;
+
+IV
 connect_start(SV* self, HV* args)
 CODE:
 {
