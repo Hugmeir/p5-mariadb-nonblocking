@@ -57,9 +57,7 @@ sub ____run {
 
     my $deferred = Promises::deferred();
 
-    $connections = is_arrayref($connections)
-                    ? $connections
-                    : [$connections];
+    $connections = [$connections] if ! is_arrayref($connections);
 
     my (@per_query_results, @errors);
 
@@ -268,7 +266,7 @@ sub ____run {
         );
 
         EV::now_update();
-        $watchers{$socket_fd}->{io_global} = EV::timer(
+        $watchers{$socket_fd}->{timer_global} = EV::timer(
             $perl_timeout,
             0, # no repeat
             sub {
@@ -322,9 +320,7 @@ sub run_multiple_queries {
         $extras,
     );
 }
-BEGIN {
-    *run_query = \&run_multiple_queries
-}
+BEGIN { *run_query = \&run_multiple_queries }
 
 sub ping {
     # use of the per_ping_finished_cb is HIGHLY discouraged.
