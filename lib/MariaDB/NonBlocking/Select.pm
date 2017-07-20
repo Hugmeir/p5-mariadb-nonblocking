@@ -1,4 +1,4 @@
-package MariaDB::NonBlocking::Poll;
+package MariaDB::NonBlocking::Select;
 use parent 'MariaDB::NonBlocking';
 
 use v5.10.1;
