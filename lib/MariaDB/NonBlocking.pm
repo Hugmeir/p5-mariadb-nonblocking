@@ -17,7 +17,9 @@ Version 0.01
 use Exporter qw(import);
 use XSLoader qw();
 
-BEGIN { our $VERSION = '0.01' };
+BEGIN {
+    our $VERSION = '0.01';
+};
 XSLoader::load(__PACKAGE__);
 
 our @EXPORT_OK = qw/
