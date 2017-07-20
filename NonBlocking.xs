@@ -1169,6 +1169,128 @@ CODE:
 }
 OUTPUT: RETVAL
 
+#define SQL_IDENTIFIER_QUOTE_CHAR '`'
+
+SV*
+quote_identifier(SV *self, ...)
+CODE:
+{
+    IV utf8_sv_count         = 0;
+    STRLEN retval_actual_len = 0;
+    STRLEN max_retval_len    = 0;
+    char *d        = NULL; /* dESTINATION */
+    IV i           = 0;
+    IV items_start = 1; /* 0 is $self */
+    IV items_end   = items;
+
+    /* TODO ansiquotes */
+
+    if ( items > 3 && SvROK(ST(items)) ) {
+        /* final item is an attr, ignore it */
+        items_end--;
+    }
+
+    /* We will do two passes -- one to find out how large a
+     * RETVAL we need to allocate, and then the second where we fill it.
+     */
+
+    for (i = items_start; i < items_end; i++ ) {
+        SV *identifier = ST(i);
+
+        if ( SvGMAGICAL(identifier) ) /* get GET magic */
+            mg_get(identifier);
+
+        if ( SvOK(identifier) ) {
+            max_retval_len += sv_len(identifier) + 2;
+
+            if ( SvUTF8(identifier) ) {
+                utf8_sv_count++;
+            }
+        }
+    }
+
+    if ( utf8_sv_count != 0 && utf8_sv_count != items ) {
+        /* Worst possible situation: we have a mix of UTF8 and non-UTF8
+         * identifiers; e.g. something like ("abc", "dèf", "ネ")
+         * So we need to assume the worst case scenario, where we
+         * must upgrade everything from latin1 to UTF-8, doubling
+         * the max_retval_len
+         */
+         max_retval_len = max_retval_len * 2;
+    }
+
+    /* Now we have to assume that the entire string will be quoted */
+    /* overflow check etc */
+    /* ``\0 is the smallest, so +3 -- and we need a connecting . per item
+     */
+     /* TODO off by one, should be items-2, but items can be 1 if
+      * $self->quote_identifier is called and I don't feel like adding the
+      * if, instead I am writing this comment which is far more work.
+      */
+    max_retval_len = (max_retval_len*2) + 3 + items-1;
+
+    RETVAL = newSV(max_retval_len);
+    SvUPGRADE(RETVAL, SVt_PV);
+    SvPOK_on(RETVAL);
+
+    if ( utf8_sv_count )
+        SvUTF8_on(RETVAL);
+
+    d = SvPVX(RETVAL);
+
+    for ( i = items_start; i < items_end; i++ ) {
+        SV *identifier = ST(i);
+        STRLEN identifier_len;
+        const char * identifier_pv;
+        bool upgraded = FALSE;
+
+        if ( !SvOK(identifier) ) {
+            /* undef! */
+            continue;
+        }
+
+        if ( utf8_sv_count && !SvUTF8(identifier) ) {
+            sv_utf8_upgrade_nomg(identifier);
+            upgraded = TRUE;
+        }
+
+        /* _nomg since we already did the mg_get() before */
+        identifier_pv = SvPV_nomg(identifier, identifier_len);
+
+        retval_actual_len = retval_actual_len + identifier_len;
+
+        *d++ = SQL_IDENTIFIER_QUOTE_CHAR;
+	    while ( identifier_len-- ) {
+		    if ( *identifier_pv == SQL_IDENTIFIER_QUOTE_CHAR ) {
+		        retval_actual_len++;
+		        *d++ = SQL_IDENTIFIER_QUOTE_CHAR;
+		    }
+		    *d++ = *identifier_pv++;
+	    }
+        *d++ = SQL_IDENTIFIER_QUOTE_CHAR;
+		retval_actual_len += 2;
+
+        if ( (i+1) != items_end ) {
+            /* not the last elem */
+            *d++ = '.';
+		    retval_actual_len++;
+        }
+
+        if ( upgraded ) {
+            sv_utf8_downgrade(identifier, 1); /* 1=FAIL_OK */
+        }
+    }
+
+    if ( d == SvPVX(RETVAL) ) { /* no identifiers provided */
+        *d++ = SQL_IDENTIFIER_QUOTE_CHAR;
+        *d++ = SQL_IDENTIFIER_QUOTE_CHAR;
+        retval_actual_len += 2;
+    }
+    *d++ = '\0';
+    SvCUR_set(RETVAL, (STRLEN)retval_actual_len);
+}
+OUTPUT: RETVAL
+
 void
 disconnect(SV* self)
 CODE:
