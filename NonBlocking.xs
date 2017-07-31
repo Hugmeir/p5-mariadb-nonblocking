@@ -1177,7 +1177,7 @@ CODE:
                 need_utf8_on = TRUE;
 
             /* need to account for the increase due to quoting */
-            max_size_of_query_string += SvCUR(query_param)*2+1; /* should be +2, but we are replacing a question mark so */
+            max_size_of_query_string += sv_len(query_param)*2+1; /* should be +2, but we are replacing a question mark so */
         }
 
         query_with_params = newSV(max_size_of_query_string);
