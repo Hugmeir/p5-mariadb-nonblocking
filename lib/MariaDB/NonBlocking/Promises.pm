@@ -301,7 +301,6 @@ sub run_multiple_queries {
     if ( !is_ref($remaining_sqls) ) {
         # ->run_query("select 1")
         $remaining_sqls = [ [$remaining_sqls, $extras, $_[3] ] ];
-        say "convrted from string";
     }
 
     if ( is_arrayref($remaining_sqls) ) {
