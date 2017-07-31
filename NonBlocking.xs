@@ -457,24 +457,24 @@ THX_do_work(pTHX_ SV* self, IV event)
                     event = 0;
                 }
                 else {
-                    SV* query_sv   = maria->query_sv;
                     STRLEN query_len;
-                    char* query_pv = SvPV(query_sv, query_len);
+                    char* query_pv = SvPV(maria->query_sv, query_len);
                     status = mysql_real_query_start(
                                 &err,
                                 maria->mysql,
                                 query_pv,
                                 query_len
                              );
-                    /* Release this */
-                    SvREFCNT_dec(query_sv);
-                    maria->query_sv = NULL;
                 }
 
                 if ( err ) {
                     /* Probably should do more here, like resetting the state */
                     maria->is_cont = FALSE;
                     state          = STATE_STANDBY;
+
+                    /* Release this */
+                    SvREFCNT_dec(maria->query_sv);
+                    maria->query_sv = NULL;
 
                     errstring = mysql_error(maria->mysql);
                 }
@@ -484,6 +484,10 @@ THX_do_work(pTHX_ SV* self, IV event)
                 else {
                     /* query finished */
                     maria->is_cont = FALSE; /* hooray! */
+
+                    /* finally, release the query string */
+                    SvREFCNT_dec(maria->query_sv);
+                    maria->query_sv = NULL;
 
                     if ( maria->store_query_result ) {
                         state = STATE_STORE_RESULT;
@@ -1262,12 +1266,10 @@ CODE:
         }
     }
     else {
-        /* See if we can cheat!  We don't need to copy the query's buffer yet --
-         * if we do into the state machine and manage to run mysql_real_query_start,
-         * we won't need to copy this at all!
-         */
-        maria->query_sv = query; /* yeah, sharing the SV, for now.  See the comment above */
-        SvREFCNT_inc(query);
+        /* we MUST copy this, because mysql_real_query will not -- it will
+         * hold on to the pointer until it is done sending the query
+         * */
+        maria->query_sv = newSVsv(query);
     }
 
     if ( maria->is_cont ) {
@@ -1289,18 +1291,6 @@ CODE:
     }
     else {
         RETVAL = do_work(self, 0);
-    }
-
-    if ( maria->query_sv && maria->query_sv == query ) {
-        /* Lousy.  We did not manage to go far enough into the state machine.
-         * We now have to copy the query SV -- keeping the original around is
-         * NOT an option since it may be re-used by our caller
-         * XXX TODO: could keep the original while replacing query's internals
-         * to point to a COW string.  That might lead to less copying.
-         */
-        SvREFCNT_dec(query); /* since we increased it before */
-        maria->query_sv = newSVsv(maria->query_sv);
-                         /* ^ the sole refcnt will belong to us */
     }
 }
 OUTPUT: RETVAL
