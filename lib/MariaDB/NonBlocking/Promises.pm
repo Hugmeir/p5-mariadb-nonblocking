@@ -21,7 +21,7 @@ use Promises (); # for deferred
 
 # Better to import this, since it is a custom op
 use Ref::Util qw(is_ref is_arrayref);
-use Scalar::Util qw(weaken);
+use Scalar::Util qw(refaddr weaken);
 
 use AnyEvent;
 
@@ -216,6 +216,8 @@ sub __grab_watcher {
         # Slightly easier, really.  Less performant since
         # we never reuse watchers.
         if ( index($watcher_type, 'timer') != -1 ) {
+            delete $storage->{$watcher_type};
+
             my $cb         = $watcher_args->[2];
             my $wrapped_cb = sub { return $cb->(MYSQL_WAIT_TIMEOUT) };
             AnyEvent->now_update;
@@ -335,9 +337,10 @@ sub ____run {
 
     my $all_watchers = {};
     CONNECTION:
-    foreach my $outside_maria ( @$connections ) {
+    foreach my $connection_idx ( 0..$#{$connections} ) {
         last CONNECTION if @errors;
 
+        my $outside_maria = $connections->[$connection_idx];
         my $wait_for = $call_start->($outside_maria);
 
         if ( !$wait_for ) {
@@ -363,6 +366,8 @@ sub ____run {
         # $maria->{watchers}{any}{cb} => sub { ...; $maria; ...; }
         my $maria = $outside_maria;
         weaken($maria);
+
+        my $deferred_refaddr = refaddr($deferred);
 
         my $watcher_ready_cb = sub {
             if ( $extras->{cancel} ) {
@@ -399,6 +404,7 @@ sub ____run {
                 # then we just return from this loop; otherwise we
                 # reject it.
                 __return_all_watchers_for_multiple_sockets($all_watchers);
+                delete $maria->{pending}{$deferred_refaddr};
                 $deferred->reject("Manual cancellation, reason: $extras->{cancel}")
                     if $deferred->is_in_progress;
                 return;
@@ -410,6 +416,7 @@ sub ____run {
             }
 
             if ( !$maria ) {
+                delete $maria->{pending}{$deferred_refaddr};
                 $deferred->reject("Connection object went away")
                     if $deferred->is_in_progress;
                 __return_all_watchers_for_multiple_sockets($all_watchers);
@@ -455,6 +462,7 @@ sub ____run {
                     # Destroy ALL watchers, otherwise
                     # we might leak some!
                 # We got an error above.  Reject the promise and bail
+                delete $maria->{pending}{$deferred_refaddr};
                 $deferred->reject(@errors);
                 return;
             }
@@ -466,6 +474,7 @@ sub ____run {
                 __return_all_watchers(delete $all_watchers->{$socket_fd}); # BOI!!
                 if ( !keys %$all_watchers ) {
                     # Ran all the queries! We can resolve and go home
+                    delete $maria->{pending}{$deferred_refaddr};
                     $deferred->resolve(\@per_query_results);
                     return;
                 }
@@ -539,16 +548,21 @@ sub ____run {
                 $perl_timeout,
                 0, # no repeat
                 sub {
+                    DEBUG && TELL "Global timeout reached";
                     __return_all_watchers_for_multiple_sockets(
                         $all_watchers
                     );
 
                     push @errors,
                         "$type execution was interrupted by perl, maximum execution time exceeded (timeout=$perl_timeout)";
+                    delete $maria->{pending}{$deferred_refaddr};
                     $deferred->reject(@errors);
                 },
             ]
         }) if $perl_timeout;
+
+        $maria->{pending}{$deferred_refaddr} = $deferred;
+        weaken($maria->{pending}{$deferred_refaddr});
     }
 
     my $promise = $deferred->promise;
@@ -566,6 +580,19 @@ sub ____run {
     }
 
     return $promise;
+}
+
+sub DESTROY {
+    my $self = shift;
+
+    my $pending = $self->{pending} // {};
+    my $pending_num = 0;
+    for my $deferred ( grep defined, values %$pending ) {
+        next unless $deferred->is_in_progress;
+        $pending_num++;
+        $deferred->reject("Connection object went away");
+    }
+    DEBUG && $pending_num && TELL "Had $pending_num operations still running when we were freed";
 }
 
 sub run_multiple_queries {
