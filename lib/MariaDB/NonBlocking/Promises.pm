@@ -4,6 +4,11 @@ use parent 'MariaDB::NonBlocking';
 use v5.18.2; # needed for __SUB__, implies strict
 use warnings;
 
+use constant DEBUG => $ENV{MariaDB_NonBlocking_DEBUG} // 0;
+sub TELL (@) {
+    say STDERR __PACKAGE__, ': ', join " ", @_;
+}
+
 BEGIN {
     my $loaded_ok;
     local $@;
@@ -31,10 +36,9 @@ my $IS_EV;
 # EV lets us cut down the number of watchers created
 # per connection significantly.
 AnyEvent::post_detect {
-    $IS_EV = ($AnyEvent::MODEL//'') eq 'AnyEvent::Impl::EV'
+    $IS_EV = ($AnyEvent::MODEL//'') eq 'AnyEvent::Impl::EV' ? 1 : 0;
+    DEBUG && TELL $IS_EV ? "Using EV" : "Using AnyEvent";
 };
-
-use constant ();
 
 BEGIN {
     my $loaded_ok;
@@ -47,11 +51,11 @@ BEGIN {
 
     if ( $loaded_ok ) {
         # EV loaded fine.  Add some aliases
-        *EV_READ  = \*EV::READ;
-        *EV_WRITE = \*EV::WRITE;
-        *EV_TIMER = \*EV::TIMER;
-        *EV_io    = \*EV::io;
-        *EV_timer = \*EV::timer;
+        *EV_READ       = \*EV::READ;
+        *EV_WRITE      = \*EV::WRITE;
+        *EV_TIMER      = \*EV::TIMER;
+        *EV_io         = \*EV::io;
+        *EV_timer      = \*EV::timer;
         *EV_now_update = \*EV::now_update;
     }
     else {
@@ -153,6 +157,8 @@ sub __grab_watcher {
     if ( exists $storage->{$watcher_type} ) {
         Carp::confess("Overriding a $watcher_type watcher!  How did this happen?");
     }
+
+    AnyEvent::detect() unless defined $IS_EV;
 
     if ( $IS_EV ) {
         # If we are using EV, reuse a watcher if we can.
