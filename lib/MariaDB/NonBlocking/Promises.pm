@@ -174,6 +174,7 @@ sub __grab_watcher {
             if ( !$existing_watcher ) {
                 # No pre-existing watcher for us to use;
                 # make a new one!
+                DEBUG && TELL "Started new $watcher_type watcher ($watcher_args->[1])";
                 $storage->{$watcher_type} = EV_io(
                     $watcher_args->[0],
                     $ev_mask,
@@ -182,6 +183,7 @@ sub __grab_watcher {
                 return;
             }
 
+            DEBUG && TELL "Reusing existing $watcher_type watcher ($watcher_args->[1])";
             $existing_watcher->set(
                     $watcher_args->[0],
                     $ev_mask,
@@ -190,6 +192,7 @@ sub __grab_watcher {
         elsif ( index($watcher_type, 'timer') != -1 ) {
             EV_now_update();
             if ( !$existing_watcher ) {
+                DEBUG && TELL "Started new $watcher_type watcher";
                 $storage->{$watcher_type} = EV_timer(
                     $watcher_args->[0],
                     $watcher_args->[1],
@@ -197,6 +200,7 @@ sub __grab_watcher {
                 );
                 return;
             }
+            DEBUG && TELL "Reusing existing $watcher_type watcher";
             $existing_watcher->set(
                     $watcher_args->[0],
                     $watcher_args->[1],
@@ -220,6 +224,7 @@ sub __grab_watcher {
 
             my $cb         = $watcher_args->[2];
             my $wrapped_cb = sub { return $cb->(MYSQL_WAIT_TIMEOUT) };
+            DEBUG && TELL "Started new $watcher_type watcher";
             AnyEvent->now_update;
             $storage->{$watcher_type} = AnyEvent->timer(
                 after    => $watcher_args->[0],
@@ -239,6 +244,7 @@ sub __grab_watcher {
             # AnyEvent works around it though, so all is good.
             my $wait_for      = $watcher_args->[1];
             my $cb            = $watcher_args->[2];
+            DEBUG && TELL "Started new $watcher_type watcher ($wait_for)";
             $storage->{io_r} = AnyEvent->io(
                 fh   => $watcher_args->[0],
                 poll => "r",
