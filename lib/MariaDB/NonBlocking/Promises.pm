@@ -132,12 +132,6 @@ sub __return_all_watchers {
     }
 }
 
-sub __return_all_watchers_for_multiple_sockets {
-    my $socket_to_watchers = $_[0] // {}; # undue caution...
-    __return_all_watchers($_) for values %$socket_to_watchers;
-    %$socket_to_watchers = ();
-}
-
 sub __wrap_ev_cb {
     my ($cb) = @_;
     return sub {
@@ -164,9 +158,8 @@ sub __grab_watcher {
         # If we are using EV, reuse a watcher if we can.
         my $cb = __wrap_ev_cb($watcher_args->[2]);
 
-        my $existing_watcher = pop @{ $WATCHER_POOL{$watcher_type} //= [] };
-
-        $storage->{$watcher_type} = $existing_watcher;
+        my $existing_watcher = $storage->{$watcher_type}
+                           ||= pop @{ $WATCHER_POOL{$watcher_type} //= [] };
 
         if ( $watcher_type eq 'io' ) {
             my $ev_mask = _mysql_watchers_to_ev_watchers($watcher_args->[1]);
@@ -286,21 +279,17 @@ sub __reset_current_watcher_or_grab_a_new_one {
 
 sub ____run {
     my (
+        $outside_maria,
         $type,
+        $start_work_cb,
+        $grab_results_cb,
         $have_work_for_conn,
-        $start,
-        $results,
-        $connections,
-        $extras
+        $extras,
     ) = @_;
 
     $extras //= {};
 
     my $perl_timeout = $extras->{perl_timeout};
-
-    my $deferred = Promises::deferred();
-
-    $connections = [$connections] if ! is_arrayref($connections);
 
     my (@per_query_results, @errors);
 
@@ -311,11 +300,9 @@ sub ____run {
 
         my $wait_for;
         while ( $have_work_for_conn->($maria) ) {
-            last if $wait_for;
-
             local $@;
             eval {
-                $wait_for = $start->($maria);
+                $wait_for = $start_work_cb->($maria);
                 1;
             } or do {
                 my $e = $@ || 'zombie error';
@@ -327,252 +314,24 @@ sub ____run {
             # busy.  Break out of this loop and return to the caller.
             return $wait_for if $wait_for;
 
-            if ( !defined($wait_for) || @errors ) {
-                return; # return undef, meaning nothing to do
-            }
+            # Errors of some sort.  Return!
+            return if !defined($wait_for) || @errors;
 
-            if ( !$wait_for ) {
-                # Query finished immediately, so we can just
-                # run the next one
-                push @per_query_results, $results->($maria);
-            }
+            # false-but-defined means the query finished
+            # immediately, so we can just run the next one
+            push @per_query_results, $grab_results_cb->($maria);
+
+            # and now, see if we need to run the query again
         }
 
         return $wait_for;
     };
 
-    my $all_watchers = {};
-    CONNECTION:
-    foreach my $connection_idx ( 0..$#{$connections} ) {
-        last CONNECTION if @errors;
+    my $wait_for = $call_start->($outside_maria);
 
-        my $outside_maria = $connections->[$connection_idx];
-        my $wait_for = $call_start->($outside_maria);
-
-        if ( !$wait_for ) {
-            # Nothing to wait for!
-            # See if we can still use this connection
-            redo CONNECTION if $have_work_for_conn->($outside_maria);
-            # Otherwise, move on to the next connection
-            next CONNECTION;
-        }
-
-        # Need to wait on the query
-        my $socket_fd         = $outside_maria->mysql_socket_fd;
-        my $previous_wait_for = $wait_for & ~MYSQL_WAIT_TIMEOUT;
-
-        $all_watchers->{$socket_fd} = $outside_maria->{watchers} //= {};
-        # $all_watchers holds a weakref to the actual watchers in
-        # our objects
-        weaken($all_watchers->{$socket_fd});
-        # ^ $all_watchers => { 3 => weak($maria->{watchers}), ... }
-
-        # $maria is weakened here, as otherwise we would
-        # have this cycle:
-        # $maria->{watchers}{any}{cb} => sub { ...; $maria; ...; }
-        my $maria = $outside_maria;
-        weaken($maria);
-
-        my $deferred_refaddr = refaddr($deferred);
-
-        my $watcher_ready_cb = sub {
-            if ( $extras->{cancel} ) {
-                # Right... this needs some explanation.
-                # Consider this situation:
-                # run_multiple_queries(
-                #   [$conn1, $conn2],
-                #   [ "select * from NonExistent", "select * from HugeTable1" ],
-                #   $extras,
-                # );
-                # run_multiple_queries(
-                #   [$conn3, $conn4],
-                #   [ "select * from HugeTable2", "select * from HugeTable3" ],
-                #   $extras,
-                # );
-                # So we have two sets of promises, each running multiple
-                # queries.  The first query for the first promise will
-                # fail since the table doesn't exist.  While that means
-                # that we will have a chance to stop the select on HugeTable1,
-                # we have no such luck for the second promise!
-                # So what if we want to stop the second promise entirely?
-                # Well, it's no easy task.  You could disconnect the
-                # handles and hope that works, but it might be that
-                # we are actually chaining a connect promise, ala
-                #   connect()->then(sub { run_multiple() })
-                # So the disconnect might not do anything!
-                # The A+ spec sadly has nothing for us here, so this
-                # tiny shim here will do; by sharing the $extras hash
-                # as in the example above, a reject/catch for the
-                # first promise will be able to stop the execution of any
-                # other related promises, by simply setting
-                #   $extras->{cancelled} = 1
-                # If the promise is already rejected or resolved,
-                # then we just return from this loop; otherwise we
-                # reject it.
-                __return_all_watchers_for_multiple_sockets($all_watchers);
-                delete $maria->{pending}{$deferred_refaddr};
-                $deferred->reject("Manual cancellation, reason: $extras->{cancel}")
-                    if $deferred->is_in_progress;
-                return;
-            }
-
-            if ( @errors ) { # Error in another connection
-                __return_all_watchers(delete $all_watchers->{$socket_fd});
-                return;
-            }
-
-            if ( !$maria ) {
-                delete $maria->{pending}{$deferred_refaddr};
-                $deferred->reject("Connection object went away")
-                    if $deferred->is_in_progress;
-                __return_all_watchers_for_multiple_sockets($all_watchers);
-                return;
-            }
-
-            my ($events_for_mysql) = @_;
-
-            # Always stop/release the timers!
-            __stop_or_return_watcher({
-                watcher_type => 'timer',
-                storage      => $maria->{watchers},
-            }) if exists $maria->{watchers}{timer};
-
-            my $wait_for;
-            local $@;
-            eval {
-                $wait_for = $maria->cont($events_for_mysql);
-                1;
-            } or do {
-                my $e = $@ || 'zombie error';
-                push @errors, $e;
-            };
-
-            while ( !$wait_for ) {
-                # query we were waiting on finished!
-                last if @errors;
-
-                # Get the results
-                push @per_query_results, $results->($maria);
-
-                # And schedule another!
-                $wait_for = $call_start->($maria);
-                # Loop will keep going until we either run a query
-                # we need to block on, in which case $wait_for will
-                # be true, or we exhaust all @queries, in which case
-                # $wait_for will be undef
-                last if !defined $wait_for;
-            }
-
-            if ( @errors ) {
-                __return_all_watchers_for_multiple_sockets($all_watchers);
-                    # Destroy ALL watchers, otherwise
-                    # we might leak some!
-                # We got an error above.  Reject the promise and bail
-                delete $maria->{pending}{$deferred_refaddr};
-                $deferred->reject(@errors);
-                return;
-            }
-
-            # If we still don't need to wait for anything, that
-            # means we are done with all queries for this dbh,
-            # so decrease the condvar counter
-            if ( !$wait_for ) {
-                __return_all_watchers(delete $all_watchers->{$socket_fd}); # BOI!!
-                if ( !keys %$all_watchers ) {
-                    # Ran all the queries! We can resolve and go home
-                    delete $maria->{pending}{$deferred_refaddr};
-                    $deferred->resolve(\@per_query_results);
-                    return;
-                }
-                # Another connection is still running.  The last query
-                # must resolve.
-                return;
-            }
-            else {
-                if ( $wait_for & MYSQL_WAIT_TIMEOUT ) {
-                    # remove for the next check if()
-                    $wait_for &= ~MYSQL_WAIT_TIMEOUT;
-                    # A timeout was specified with the connection.
-                    # This will call this same callback;
-                    # query_cont will eventually call
-                    # the relevant _cont method with MYSQL_WAIT_TIMEOUT,
-                    # and let the driver decide what to do next.
-                    my $timeout_ms = $maria->get_timeout_value_ms();
-                    __reset_current_watcher_or_grab_a_new_one({
-                        watcher_type => 'timer',
-                        storage      => $maria->{watchers},
-                        watcher_args => [
-                            # EV wants (fractional) seconds
-                            $timeout_ms/1000,
-                            0, # do not repeat
-                            __SUB__,
-                        ],
-                    # Bug in the client lib makes the no-timeout case come
-                    # back as 0 timeout.  So only create the timer if we
-                    # actually have a timeout.
-                    # https://lists.launchpad.net/maria-developers/msg09971.html
-                    }) if $timeout_ms;
-                }
-
-                if ( $wait_for != $previous_wait_for ) {
-                    $previous_wait_for = $wait_for;
-                    # Server wants us to wait on something else, so
-                    # we can't reuse the previous mask.
-                    # e.g. we had a watcher waiting on the socket
-                    # being readable, but we need to wait for it to
-                    # become writeable (or both) instead.
-                    # This almost never happens, but we need to
-                    # support it for SSL renegotiation.
-                    __reset_current_watcher_or_grab_a_new_one({
-                        watcher_type => 'io',
-                        storage      => $maria->{watchers},
-                        watcher_args => [
-                            $socket_fd,
-                            $wait_for,
-                            __SUB__,
-                        ]
-                    });
-                }
-            }
-            return;
-        };
-
-        __grab_watcher({
-            watcher_type => 'io',
-            storage      => $outside_maria->{watchers},
-            watcher_args => [
-                $socket_fd,
-                $wait_for & ~MYSQL_WAIT_TIMEOUT,
-                $watcher_ready_cb,
-            ]
-        });
-
-        __grab_watcher({
-            watcher_type => 'timer_global',
-            storage      => $outside_maria->{watchers},
-            watcher_args => [
-                $perl_timeout,
-                0, # no repeat
-                sub {
-                    DEBUG && TELL "Global timeout reached";
-                    __return_all_watchers_for_multiple_sockets(
-                        $all_watchers
-                    );
-
-                    push @errors,
-                        "$type execution was interrupted by perl, maximum execution time exceeded (timeout=$perl_timeout)";
-                    delete $maria->{pending}{$deferred_refaddr};
-                    $deferred->reject(@errors);
-                },
-            ]
-        }) if $perl_timeout;
-
-        $maria->{pending}{$deferred_refaddr} = $deferred;
-        weaken($maria->{pending}{$deferred_refaddr});
-    }
-
+    my $deferred = Promises::deferred();
     my $promise = $deferred->promise;
-    if ( !keys %$all_watchers ) {
+    if ( !$wait_for ) {
         # All queries on all connections finished immediately.
         # So reject or resolve as necessary
         if ( @errors ) {
@@ -583,7 +342,161 @@ sub ____run {
         else {
             $deferred->resolve(\@per_query_results);
         }
+        return $promise;
     }
+
+    # Need to wait on the query
+    my $socket_fd         = $outside_maria->mysql_socket_fd;
+    my $previous_wait_for = $wait_for & ~MYSQL_WAIT_TIMEOUT;
+
+    # $maria is weakened here, as otherwise we would
+    # have this cycle:
+    # $maria->{watchers}{any}{cb} => sub { ...; $maria; ...; }
+    my $maria = $outside_maria;
+    weaken($maria);
+
+    my $deferred_refaddr = refaddr($deferred);
+
+    my $watcher_ready_cb = sub {
+        if ( !$maria ) {
+            $deferred->reject("Connection object went away")
+                if $deferred->is_in_progress;
+            return;
+        }
+
+        my ($events_for_mysql) = @_;
+
+        # Always stop/release the timers!
+        __stop_or_return_watcher({
+            watcher_type => 'timer',
+            storage      => $maria->{watchers},
+        }) if exists $maria->{watchers}{timer};
+
+        my $wait_for;
+        local $@;
+        eval {
+            $wait_for = $maria->cont($events_for_mysql);
+            1;
+        } or do {
+            my $e = $@ || 'zombie error';
+            push @errors, $e;
+        };
+
+        while ( !$wait_for ) {
+            # query we were waiting on finished!
+            last if @errors;
+
+            # Get the results
+            push @per_query_results, $grab_results_cb->($maria);
+
+            # And schedule another!
+            $wait_for = $call_start->($maria);
+            # Loop will keep going until we either run a query
+            # we need to block on, in which case $wait_for will
+            # be true, or we exhaust all @queries, in which case
+            # $wait_for will be undef
+            last if !defined $wait_for;
+        }
+
+        if ( @errors ) {
+            __return_all_watchers(delete $maria->{watchers});
+                # Destroy ALL watchers, otherwise
+                # we might leak some!
+            # We got an error above.  Reject the promise and bail
+            delete $maria->{pending}{$deferred_refaddr};
+            $deferred->reject(@errors);
+            return;
+        }
+
+        # If we still don't need to wait for anything, that
+        # means we are done with all queries for this dbh,
+        # so decrease the condvar counter
+        if ( !$wait_for ) {
+            __return_all_watchers(delete $maria->{watchers}); # BOI!!
+            # Ran all the queries! We can resolve and go home
+            delete $maria->{pending}{$deferred_refaddr};
+            $deferred->resolve(\@per_query_results);
+            return;
+        }
+
+        if ( $wait_for & MYSQL_WAIT_TIMEOUT ) {
+            # remove for the next check if()
+            $wait_for &= ~MYSQL_WAIT_TIMEOUT;
+            # A timeout was specified with the connection.
+            # This will call this same callback;
+            # query_cont will eventually call
+            # the relevant _cont method with MYSQL_WAIT_TIMEOUT,
+            # and let the driver decide what to do next.
+            my $timeout_ms = $maria->get_timeout_value_ms();
+            __reset_current_watcher_or_grab_a_new_one({
+                watcher_type => 'timer',
+                storage      => $maria->{watchers},
+                watcher_args => [
+                    # EV wants (fractional) seconds
+                    $timeout_ms/1000,
+                    0, # do not repeat
+                    __SUB__,
+                ],
+            # Bug in the client lib makes the no-timeout case come
+            # back as 0 timeout.  So only create the timer if we
+            # actually have a timeout.
+            # https://lists.launchpad.net/maria-developers/msg09971.html
+            }) if $timeout_ms;
+        }
+
+        if ( $wait_for != $previous_wait_for ) {
+            $previous_wait_for = $wait_for;
+            # Server wants us to wait on something else, so
+            # we can't reuse the previous mask.
+            # e.g. we had a watcher waiting on the socket
+            # being readable, but we need to wait for it to
+            # become writeable (or both) instead.
+            # This almost never happens, but we need to
+            # support it for SSL renegotiation.
+            __reset_current_watcher_or_grab_a_new_one({
+                watcher_type => 'io',
+                storage      => $maria->{watchers},
+                watcher_args => [
+                    $socket_fd,
+                    $wait_for,
+                    __SUB__,
+                ]
+            });
+        }
+        return;
+    };
+
+    $outside_maria->{watchers} //= {};
+    __grab_watcher({
+        watcher_type => 'io',
+        storage      => $outside_maria->{watchers},
+        watcher_args => [
+            $socket_fd,
+            $wait_for & ~MYSQL_WAIT_TIMEOUT,
+            $watcher_ready_cb,
+        ]
+    });
+
+    __grab_watcher({
+        watcher_type => 'timer_global',
+        storage      => $outside_maria->{watchers},
+        watcher_args => [
+            $perl_timeout,
+            0, # no repeat
+            sub {
+                DEBUG && TELL "Global timeout reached";
+                __return_all_watchers(delete $maria->{watchers});
+
+                push @errors,
+                    "$type execution was interrupted by perl, maximum execution time exceeded (timeout=$perl_timeout)";
+                delete $maria->{pending}{$deferred_refaddr};
+                $deferred->reject(@errors);
+            },
+        ]
+    }) if $perl_timeout;
+
+    $outside_maria->{pending}{$deferred_refaddr} = $deferred;
+    weaken($outside_maria->{pending}{$deferred_refaddr});
 
     return $promise;
 }
@@ -601,8 +514,8 @@ sub DESTROY {
     DEBUG && $pending_num && TELL "Had $pending_num operations still running when we were freed";
 }
 
-sub run_multiple_queries {
-    my ($conns, $remaining_sqls, $extras) = @_;
+sub run_query {
+    my ($conn, $remaining_sqls, $extras) = @_;
 
     if ( !is_ref($remaining_sqls) ) {
         # ->run_query("select 1")
@@ -627,68 +540,28 @@ sub run_multiple_queries {
     }
 
     my $next_sql = $remaining_sqls->();
-    ____run(
-        "run_queries",
-        sub { is_arrayref($next_sql) && @$next_sql },
+    $conn->____run(
+        "run_query",
         sub {
             my $ret = $_[0]->run_query_start( @$next_sql );
             $next_sql = $remaining_sqls->();
             return $ret;
         },
-        sub {$_[0]->query_results},
-        $conns,
+        sub { $_[0]->query_results },
+        sub { is_arrayref($next_sql) && @$next_sql },
         $extras,
     );
 }
-BEGIN { *run_query = \&run_multiple_queries }
 
 sub ping {
-    # use of the per_ping_finished_cb is HIGHLY discouraged.
-    # It exists solely for the case when $conn is an arrayref of
-    # objects, and waiting on all of them to finish isn't
-    # ideal -- for example, if we want to deal immediately
-    # with the disconnect
-    my ($conn, $extras, $per_ping_finished_cb) = @_;
+    my ($conn, $extras) = @_;
 
-    my %seen;
-    ____run(
+    my $once;
+    $conn->____run(
         "ping",
-        sub { return !$seen{$_[0]} },
-        sub {
-            $seen{$_[0]}++;
-            $_[0]->ping_start();
-        },
-        sub {
-            my $res = $_[0]->ping_result;
-            $per_ping_finished_cb->( $_[0], $res )
-                if $per_ping_finished_cb;
-            return $res;
-        },
-        $conn,
-        $extras,
-    );
-}
-
-# useful if you want to run the same query on multiple connections
-# Think changing per-session settings.
-sub query_once_per_connection {
-    my ($conns, $query, $extras, $bind, $per_query_finished_cb) = @_;
-
-    my %seen;
-    ____run(
-        "run_query_once_per_conn",
-        sub { return !$seen{$_[0]} },
-        sub {
-            $seen{$_[0]}++;
-            $_[0]->run_query_start($query, $extras, $bind)
-        },
-        sub {
-            my $res = $_[0]->query_results;
-            $per_query_finished_cb->($_[0], $res)
-                if $per_query_finished_cb;
-            return $res;
-        },
-        $conns,
+        sub { $_[0]->ping_start()  }, # start
+        sub { $_[0]->ping_result() }, # end
+        sub { !$once++ },             # no multiple operations
         $extras,
     );
 }
@@ -696,16 +569,12 @@ sub query_once_per_connection {
 sub connect {
     my ($conn, $connect_args, $extras) = @_;
 
-    my %seen;
-    ____run(
+    my $once = 0;
+    $conn->____run(
         "connect",
-        sub { return !$seen{$_[0]} },
-        sub {
-            $seen{$_[0]}++;
-            $_[0]->connect_start($connect_args);
-        },
-        sub { $_[0] },
-        $conn,
+        sub { $_[0]->connect_start($connect_args) }, # start
+        sub { $_[0] },                               # end
+        sub { !$once++ },                            # no multiple operations
         $extras,
     );
 }
