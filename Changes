@@ -1,5 +1,14 @@
 Revision history for MariaDB-NonBlocking
 
+0.08    2017-10-12
+        * Added a plain eventloop implementation, and
+          then reimplemented the promises version as a
+          thin wrapper of that.
+        * Simplified the API; now there are only three
+          methods (connect, run_query, ping) which are
+          called on connections, rather than class
+          methods that got called on pools of connections.
+
 0.07    2017-09-13
         * DESTROY() will now reject all pending promises.
         * AnyEvent::detect() will be called before the first
