@@ -1,5 +1,9 @@
 Revision history for MariaDB-NonBlocking
 
+0.10    2017-10-13
+        * cast values so that mysql ints actually show
+          up as Perl IVs
+
 0.09    2017-10-13
         * Look for headers/libraries in MariaDB-specific
           paths before going for the more generic ones.
