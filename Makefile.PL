@@ -22,6 +22,13 @@ GetOptions(
 );
 my $mariadb_path = $opt->{mariadb_path};
 
+my $INSTALL_BASE;
+foreach my $arg ( grep defined, @ARGV, $ENV{PERL_MM_OPT} ) {
+    next unless $arg =~ /\bINSTALL_BASE=((?:\S+|\s(?!\S+=))+)\b/sm;
+    $INSTALL_BASE = $1;
+    last;    
+}
+
 sub write_config_for_tests {
     my $opt = $_[0];
     my @opts_from_file = eval { require "t/mysql.mtest" };
@@ -100,8 +107,9 @@ sub get_paths_out_of_config_and_split {
                         glibpath
                     /);
 
-    unshift @libpaths, $mariadb_path, File::Spec->catdir($mariadb_path, "lib")
-        if $mariadb_path;
+    for my $rootdir ( grep defined, $mariadb_path, $INSTALL_BASE ) {
+        unshift @libpaths, $rootdir, File::Spec->catdir($rootdir, "lib");
+    }
 
     sub find_libpath_for { grep defined, map find_file_in($_, @libpaths), @_ }
 }
@@ -114,8 +122,11 @@ sub get_paths_out_of_config_and_split {
                         locincpath
                         usrinc
                     /);
-    unshift @incpaths, $mariadb_path, File::Spec->catdir($mariadb_path, "include")
-        if $mariadb_path;
+
+    for my $rootdir ( grep defined, $mariadb_path, $INSTALL_BASE ) {
+        unshift @incpaths, $rootdir, File::Spec->catdir($rootdir, "include");
+    }
+
     sub find_incpath_for { grep defined, map find_file_in($_, @incpaths), @_ }
 }
 
