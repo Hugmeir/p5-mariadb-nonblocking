@@ -18,4 +18,5 @@ t/02-select-promise.t
 t/03-create-table-promise.t
 t/04-insert-promise.t
 t/05-update-promise.t
+t/06-cyclic-refs.t
 Pakket.json
