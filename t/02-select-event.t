@@ -8,6 +8,7 @@ use Test::More;
 use AnyEvent;
 use MariaDB::NonBlocking::Event;
 use Data::Dumper;
+AnyEvent::detect();
 
 use lib 't', '.';
 require 'lib.pl';
@@ -27,7 +28,7 @@ $conn->connect(
             my ($conn) = @_;
             my $socket_fd = $conn->mysql_socket_fd;
             cmp_ok($socket_fd, '>=', 1, "Got a socket FD after connecting");
-            
+
             $conn->run_query("SELECT 1", undef, {
                 success_cb => sub {
                     $cv->send;

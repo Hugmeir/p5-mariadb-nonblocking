@@ -27,6 +27,7 @@ sub new {
 }
 
 sub __clean_object {
+    my ($maria) = @_;
     delete $maria->{previous_wait_for};
     delete $maria->{pending};
     delete $maria->{watcher_storage};
@@ -36,9 +37,9 @@ sub __set_timer {
     my ($storage, $watcher_type, $timeout_s, $cb) = @_;
     AE::now_update();
     $storage->{$watcher_type} = AE::timer(
-        after    => $timeout_s,
-        interval => 0,
-        cb       => sub { $cb->(MYSQL_WAIT_TIMEOUT) },
+        $timeout_s,
+        0,
+        sub { $cb->(MYSQL_WAIT_TIMEOUT) },
     );
 }
 
@@ -53,16 +54,16 @@ sub __set_io_watcher {
 
     # amusingly, this is broken in libuv, since
     # you cannot have two watchers on the same fd;
-    DEBUG && TELL "Started new $watcher_type watcher ($wait_for)";
+    DEBUG && TELL "Started new io watcher ($wait_for)";
     $storage->{io_r} = AE::io(
-        fh   => $fd,
-        poll => "r",
-        cb   => sub { $cb->(MYSQL_WAIT_READ) }
+        $fd,
+        0,
+        sub { $cb->(MYSQL_WAIT_READ) },
     ) if $wait_for & MYSQL_WAIT_READ;
     $storage->{io_w} = AE::io(
-        fh   => $fd,
-        poll => "w",
-        cb   => sub { $cb->(MYSQL_WAIT_WRITE) }
+        $fd,
+        1,
+        sub { $cb->(MYSQL_WAIT_WRITE) },
     ) if $wait_for & MYSQL_WAIT_WRITE;
     return;
 }
@@ -72,14 +73,10 @@ sub ____run {
         $outside_maria,
         $start_work_cb,
         $grab_results_cb,
-        $extras,
+        $success_cb_orig,
+        $failure_cb_orig,
+        $perl_timeout,
     ) = @_;
-
-    $extras //= {};
-
-    my $perl_timeout      = $extras->{perl_timeout};
-    my $success_cb_orig   = $extras->{success_cb};
-    my $failure_cb_orig   = $extras->{failure_cb};
 
     if ( !is_coderef($success_cb_orig) ) {
         Carp::confess(ref($outside_maria) . " was not given a coderef to success_cb");
@@ -114,7 +111,7 @@ sub ____run {
 
         my ($events_for_mysql) = @_;
 
-        # Always stop the timer
+        # Always disarm the mysql-specified timer
         delete $maria->{watcher_storage}{timer};
 
         my $wait_for = $maria->{previous_wait_for}
@@ -139,34 +136,27 @@ sub ____run {
 
             # remove for the next check if()
             $wait_for &= ~MYSQL_WAIT_TIMEOUT;
-=begin
-# Implemented via the global timeout
 
+            my $timeout_ms = $maria->get_timeout_value_ms();
             # A timeout was specified with the connection.
             # This will call this same callback;
             # query_cont will eventually call
             # the relevant _cont method with MYSQL_WAIT_TIMEOUT,
             # and let the driver decide what to do next.
-            my $timeout_ms = $maria->get_timeout_value_ms();
-            __grab_watcher({
-                watcher_type => 'timer',
-                storage      => $maria->{watchers},
-                watcher_args => [
-                    # AE wants (fractional) seconds
-                    $timeout_ms/1000,
-                    0, # do not repeat
-                    __SUB__,
-                ],
+            __set_timer(
+                $maria->{watcher_storage} //= {},
+                'timer',
+                $timeout_ms/1000, # AE wants fractional seconds
+                __SUB__,
             # Bug in the client lib makes the no-timeout case come
             # back as 0 timeout.  So only create the timer if we
             # actually have a timeout.
             # https://lists.launchpad.net/maria-developers/msg09971.html
-            }) if $timeout_ms;
-=cut
+            ) if $timeout_ms;
         }
 
-        if ( $wait_for != $previous_wait_for ) {
-            $previous_wait_for = $wait_for;
+        if ( $wait_for != $maria->{previous_wait_for} ) {
+            $maria->{previous_wait_for} = $wait_for;
             # Server wants us to wait on something else, so
             # we can't reuse the previous mask.
             # e.g. we had a watcher waiting on the socket
@@ -235,7 +225,7 @@ sub run_query {
         sub { $_[0]->run_query_start( @$sql_with_args ) },
         sub { $_[0]->query_results },
         $extras->{success_cb},
-        $exteas->{failure_cb},
+        $extras->{failure_cb},
         $extras->{perl_timeout} || 0,
     );
 }
@@ -247,7 +237,7 @@ sub ping {
         sub { $_[0]->ping_start()  }, # start
         sub { $_[0]->ping_result() }, # end
         $extras->{success_cb},
-        $exteas->{failure_cb},
+        $extras->{failure_cb},
         $extras->{perl_timeout} || 0,
     );
 }
@@ -259,7 +249,7 @@ sub connect {
         sub { $_[0]->connect_start($connect_args) }, # start
         sub { $_[0] },                               # end
         $extras->{success_cb},
-        $exteas->{failure_cb},
+        $extras->{failure_cb},
         $extras->{perl_timeout} || 0,
     );
 }

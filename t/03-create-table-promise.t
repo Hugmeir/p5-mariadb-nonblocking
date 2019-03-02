@@ -6,9 +6,10 @@ no warnings 'once';
 
 use Test::More;
 use AnyEvent;
-use Promises qw/collect/;
+use AnyEvent::XSPromises qw/collect/;
 use MariaDB::NonBlocking::Promises;
 use Data::Dumper;
+AnyEvent::detect();
 
 use lib 't', '.';
 require 'lib.pl';

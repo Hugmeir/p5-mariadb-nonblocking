@@ -6,9 +6,10 @@ no warnings 'once';
 
 use Test::More;
 use AnyEvent;
-use Promises qw/collect/;
+use AnyEvent::XSPromises qw/collect/;
 use MariaDB::NonBlocking::Promises;
 use Data::Dumper;
+AnyEvent::detect();
 
 use lib 't', '.';
 require 'lib.pl';
@@ -34,7 +35,7 @@ my $connect_and_query = $conn->connect($connect_args)->then(sub {
     my ($conn) = @_;
     my $socket_fd = $conn->mysql_socket_fd;
     cmp_ok($socket_fd, '>=', 1, "Got a socket FD after connecting");
-    
+
     return $conn->run_query("SELECT 1")->then(sub {
         is_deeply($_[0], [[1]], "SELECT 1 worked");
     }, sub {
@@ -87,7 +88,7 @@ wait_for_promise $query_without_connecting;
 my $connect_and_run_multiple_queries = $conn2->connect($connect_args)->then(
     sub {
         my ($conn2) = @_;
-        
+
         my $p1 = $conn->run_query("SHOW PROCESSLIST");
         my $p2 = $conn2->run_query("SELECT 1, SLEEP(1)");
 

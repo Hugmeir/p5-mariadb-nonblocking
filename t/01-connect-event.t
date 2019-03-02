@@ -9,6 +9,8 @@ use AnyEvent;
 use MariaDB::NonBlocking::Event;
 use Data::Dumper;
 
+AnyEvent::detect();
+
 use lib 't', '.';
 require 'lib.pl';
 
