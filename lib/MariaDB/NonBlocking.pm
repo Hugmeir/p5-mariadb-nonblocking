@@ -241,7 +241,6 @@ sub ____run {
     return if $done;
 
     $maria->_set_timer(
-        $maria->{watcher_storage} //= {},
         'global_timer',
         $perl_timeout,
         sub {
