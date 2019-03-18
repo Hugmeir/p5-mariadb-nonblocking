@@ -988,6 +988,7 @@ THX_unpack_config_from_hashref(pTHX_ SV* self, HV* args)
 #undef my_mysql_opt_integer
 
     if ( FETCH_FROM_HV("ssl") ) {
+        my_bool ssl_enforce = 1;
         my_bool reject_unauthorized = 0;
         bool use_default_ciphers    = TRUE;
         HV *ssl;
@@ -1001,8 +1002,8 @@ THX_unpack_config_from_hashref(pTHX_ SV* self, HV* args)
         }
 
 #define ssl_config_set(s) STMT_START {                           \
-    config->ssl_##s = savepv(easy_arg_fetch(ssl, #s, FALSE));    \
-    if ( !config->ssl_##s ) config->ssl_##s = "";                \
+    const char *tmp = easy_arg_fetch(ssl, #s, FALSE);            \
+    config->ssl_##s = tmp ? savepv(tmp) : NULL;    \
 } STMT_END
 
         ssl_config_set(key);
@@ -1017,6 +1018,9 @@ THX_unpack_config_from_hashref(pTHX_ SV* self, HV* args)
 
         if ( (svp = hv_fetchs(ssl, "reject_unauthorized", FALSE)) && *svp )
             reject_unauthorized = cBOOL(SvTRUE(*svp)) ? 1 : 0;
+
+        if ( (svp = hv_fetchs(ssl, "optional", FALSE)) && *svp )
+            ssl_enforce = !SvTRUE(*svp);
 
 /*
         mysql_options(
@@ -1040,8 +1044,9 @@ THX_unpack_config_from_hashref(pTHX_ SV* self, HV* args)
             &reject_unauthorized
         );
 
-/* aka somewhat modern shit */
-#define DEFAULT_CIPHERS "ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-SHA384:ECDHE-RSA-AES256-SHA384:ECDHE-ECDSA-AES128-SHA256:ECDHE-RSA-AES128-SHA256"
+        if (mysql_options(maria->mysql, MYSQL_OPT_SSL_ENFORCE, &ssl_enforce) != 0) {
+            croak("Enforcing SSL encryption is not supported");
+        }
 
         mysql_ssl_set(
             maria->mysql,
@@ -1049,9 +1054,7 @@ THX_unpack_config_from_hashref(pTHX_ SV* self, HV* args)
             config->ssl_cert,
             config->ssl_ca,
             config->ssl_capath,
-            use_default_ciphers
-                ? DEFAULT_CIPHERS
-                : config->ssl_cipher
+            use_default_ciphers ? NULL : config->ssl_cipher
         );
     }
 
