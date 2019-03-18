@@ -629,10 +629,10 @@ sub _run_query {
     my $time0 = time();
     my $cpu0  = times;
     $attr //= {};
-    local $attr->{want_hashrefs} = 1 unless exists $attr->{want_hashrefs};
+    $attr->{want_hashrefs} = 1 unless exists $attr->{want_hashrefs};
 
     # Force all queries to have timeouts.
-    local $attr->{perl_timeout}
+    $attr->{perl_timeout}
         = ($attr->{timeout}//0) <= 0
             # Default to slightly higher than the MySQL timeout:
             ? $outside_pool->{max_execution_time} * 1.2
