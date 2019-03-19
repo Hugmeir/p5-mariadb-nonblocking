@@ -987,8 +987,8 @@ THX_unpack_config_from_hashref(pTHX_ SV* self, HV* args)
 #undef my_mysql_opt_integer
 
     if ( FETCH_FROM_HV("ssl") ) {
+        my_bool ssl_verify  = 0;
         my_bool ssl_enforce = 1;
-        my_bool reject_unauthorized = 0;
         bool use_default_ciphers    = TRUE;
         HV *ssl;
 
@@ -1015,36 +1015,32 @@ THX_unpack_config_from_hashref(pTHX_ SV* self, HV* args)
             use_default_ciphers = FALSE;
         }
 
-        if ( (svp = hv_fetchs(ssl, "reject_unauthorized", FALSE)) && *svp )
-            reject_unauthorized = cBOOL(SvTRUE(*svp)) ? 1 : 0;
-
         if ( (svp = hv_fetchs(ssl, "optional", FALSE)) && *svp )
             ssl_enforce = !SvTRUE(*svp);
 
-/*
-        mysql_options(
-            maria->mysql,
-            MYSQL_OPT_SSL_MODE,
-            reject_unauthorized
-                ? &SSL_MODE_REQUIRED
-                : &SSL_MODE_PREFERRED
-        );
-*/
+        if ((svp = hv_fetchs(ssl, "verify_server_cert", FALSE)) && *svp) {
+            ssl_verify = SvTRUE(*svp);
+        }
 
-        /* What a fucking mess.  This is deprecated and will be
-         * removed in MySQL 8.  But the ssl modes enum isn't available
-         * everywhere, so you can't use Oracle's recommended way. Bah.
-         * TODO fix all of this ffs
-         */
-
-        mysql_options(
-            maria->mysql,
-            MYSQL_OPT_SSL_VERIFY_SERVER_CERT,
-            &reject_unauthorized
-        );
-
+#if defined(MYSQL_OPT_SSL_ENFORCE)
         if (mysql_options(maria->mysql, MYSQL_OPT_SSL_ENFORCE, &ssl_enforce) != 0) {
             croak("Enforcing SSL encryption is not supported");
+        }
+#elif defined(MYSQL_OPT_SSL_VERIFY_SERVER_CERT)
+        /* Try this instead... */
+        ssl_verify = 1;
+#else
+        croak("Enforcing SSL encryption is not supported");
+#endif
+
+        if ( ssl_verify &&
+#ifdef MYSQL_OPT_SSL_VERIFY_SERVER_CERT
+            mysql_options(maria->mysql, MYSQL_OPT_SSL_VERIFY_SERVER_CERT, &ssl_verify) != 0
+#else
+            TRUE
+#endif
+        ) {
+            croak("verify_server_cert=1 (or optional=0 in a version without MYSQL_OPT_SSL_ENFORCE) is not supported");
         }
 
         mysql_ssl_set(
