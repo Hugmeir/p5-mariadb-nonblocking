@@ -224,6 +224,7 @@ sub new {
 
 sub reset_pool {
     my ($pool) = @_;
+    $pool->fail_pending('Pool reset');
     $pool->{pool_size}   = 0;
     $pool->{in_use_connections} = {};
     $pool->{free_connections}   = {};
@@ -403,10 +404,8 @@ sub _check_and_maybe_extend_pool_size {
                 # pending queries.  Fail the queries now.
                 my $pool_name    = $pool->{pool_name};
                 my $error_string = "Connection pool for $pool_name is empty and we failed to extend it.  All pending queries will be marked as failed. Error: $confession";
-                $pool->fail_pending(
-                    # $error_string has the confession AND the stacktrace
-                    $error_string,
-                );
+                # $error_string has the confession AND the stacktrace
+                $pool->fail_pending($error_string);
                 # Don't rethrow, let the actual promises deal with the fallout
                 return;
             })->finally(sub {
