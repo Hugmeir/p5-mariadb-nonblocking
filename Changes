@@ -1,5 +1,8 @@
 Revision history for MariaDB-NonBlocking
 
+0.17    2019-03-19
+        * SSL was broken older (pre-2018) versions of mariadb-connector-c
+
 0.16    2019-03-19
         * Barebones SSL support (including facsimile of mysql_ssl_optional=1)
         * Global timers were broken

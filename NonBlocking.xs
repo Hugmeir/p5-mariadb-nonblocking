@@ -855,7 +855,7 @@ THX_quote_sv(pTHX_ MariaDB_client* maria, SV* to_be_quoted)
     if ( to_be_quoted_len == 0 ) {
         return newSVpvs("\"\""); /* "", not '', not sure why */
     }
-    
+
     if ( (to_be_quoted_len+3) > (MEM_SIZE_MAX/2) ) {
         croak("Cannot quote absurdly long string, would cause an overflow");
     }
