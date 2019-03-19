@@ -387,14 +387,10 @@ sub _check_and_maybe_extend_pool_size {
 
     my $pool = $outside_pool;
 
-    # Return if pool already at max size:
-    return if $pool->{pool_size} >= $pool->{high_water_mark};
-
     # Return if pool has more than the low water mark
     return if $pool->{pool_size} >= $pool->{low_water_mark};
 
-    my $needed_connections
-        = $pool->{high_water_mark} - $pool->{pool_size};
+    my $needed_connections = $pool->{high_water_mark} - $pool->{pool_size};
 
     $needed_connections -= $pool->{_counters}{connections_currently_connecting} || 0;
     DEBUG && TELL "Going to extend the pool by $needed_connections";
@@ -432,16 +428,19 @@ sub _check_and_maybe_extend_pool_size {
             my $t0 = time;
             return $initial_connection->connect($connection_args)->then(sub {
                 # Success
+                return unless $pool;
                 my ($connection) = @_; # $connection is a hard reference to the connection.
                 $pool->_log_time_to_connect($connection_args, $t0);
 
                 return $pool->_fetch_some_wait_timeout($connection)->then(sub {
-                    return $pool->_initialize_new_connection($connection, $connection_args);
+                    return $pool->_initialize_new_connection($connection, $connection_args) if $pool;
+                })->catch(sub {
+                    warn "Failed to initialize the connection in some way. Will ignore. Error:\n$_[0]";
                 })->then(sub {
-                    $pool->_add_connection_to_pool($connection, $refaddr);
+                    DEBUG && TELL "Successfully added new connection to pool";
+                    $pool->_add_connection_to_pool($connection, $refaddr) if $pool;
                 });
-            },
-            sub {
+            })->catch(sub {
                 # Error
                 my ($error) = @_;
 
@@ -835,7 +834,6 @@ sub _start_running_queries_if_needed {
             if ( !$deferred->is_in_progress ) {
                 # Probably timed out
                 DEBUG && TELL "Found already finished query in the deferred queue";
-                $pool->_add_connection_to_pool($conn);
                 next PENDING;
             }
 
