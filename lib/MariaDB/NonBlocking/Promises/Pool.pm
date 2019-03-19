@@ -201,7 +201,11 @@ sub DESTROY {
 }
 
 # Public interface.
-our $STACKTRACE_IGNORE = {};
+our $STACKTRACE_IGNORE = { map +($_=>1),
+    'AnyEvent::XSPromises::Loader',
+    'AnyEvent::Impl::EV',
+    'AnyEvent::CondVar::Base',
+};
 for ( my @parts = split /::/, __PACKAGE__; @parts; pop @parts ) {
     $STACKTRACE_IGNORE->{join '::', @parts} = 1;
 }
@@ -546,6 +550,48 @@ sub fail_pending {
         my $deferred       = $pending->[PENDING_DEFERRED];
         my $stacktrace_ref = $pending->[PENDING_STACKTRACE];
         $deferred->reject($error_string . $$stacktrace_ref)
+            if $deferred->is_in_progress;
+    }
+}
+
+sub fail_queries_left_scheduled_for_too_long {
+    my ($pool) = @_;
+    my $pending_queries = $pool->{pending_queries} // [];
+    return unless @$pending_queries;
+
+    my $time_in_seconds_a_query_can_remain_in_the_pool_without_being_run = $pool->{max_execution_time};
+    $time_in_seconds_a_query_can_remain_in_the_pool_without_being_run *= 1.5;
+
+    my $time      = time;
+    my $found_idx = -1;
+    foreach my $idx ( 0..$#$pending_queries ) {
+        my $pending = $pending_queries->[$idx];
+        next unless $pending;
+        my $pending_scheduled_at = $pending->[PENDING_SCHEDULED_TIME];
+        my $pending_max_time_in_pool = $pending_scheduled_at + $time_in_seconds_a_query_can_remain_in_the_pool_without_being_run;
+        if ( $pending_max_time_in_pool > $time ) {
+            last;
+        }
+        $found_idx = $idx;
+    }
+    return unless $found_idx >= 0;
+
+    my @removed = splice(@$pending_queries, 0, $found_idx);
+    my $scheduling_timeout = $time_in_seconds_a_query_can_remain_in_the_pool_without_being_run;
+    foreach my $pending (@removed) {
+        my $query_id       = refaddr $pending;
+        my $deferred       = $pending->[PENDING_DEFERRED];
+        my $stacktrace_ref = $pending->[PENDING_STACKTRACE];
+        my $timeout_message = sprintf(<<"EOERROR", $scheduling_timeout, $query_id, $$stacktrace_ref);
+MySQL query (nonblocking) could not be started after %d seconds, so we are marking it as failed.
+Query ID: %d
+See http://go/:Nt for details on how to deal with this.
+
+Stacktrace:
+%s
+EOERROR
+
+        $deferred->reject($timeout_message)
             if $deferred->is_in_progress;
     }
 }
