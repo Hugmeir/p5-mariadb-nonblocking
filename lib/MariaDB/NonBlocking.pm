@@ -17,7 +17,7 @@ MariaDB::NonBlocking - Nonblocking connections to MySQL using libmariadbclient
 
 =head1 VERSION
 
-Version 0.17
+Version 0.18
 
 =cut
 
@@ -25,7 +25,7 @@ use Exporter qw(import);
 use XSLoader qw();
 
 BEGIN {
-    our $VERSION = '0.17';
+    our $VERSION = '0.18';
     XSLoader::load(__PACKAGE__);
 };
 
@@ -419,7 +419,7 @@ L<http://search.cpan.org/dist/MariaDB-NonBlocking/>
 
 =head1 LICENSE AND COPYRIGHT
 
-Copyright 2017 Brian Fraser.
+Copyright 2019 Brian Fraser.
 
 This program is free software; you can redistribute it and/or modify it
 under the terms of the the Artistic License (2.0). You may obtain a

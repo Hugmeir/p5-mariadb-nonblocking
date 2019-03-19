@@ -1,5 +1,9 @@
 Revision history for MariaDB-NonBlocking
 
+0.18    2019-03-19
+        * SSL was broken older (pre-2018) versions of mariadb-connector-c.
+          Again.
+
 0.17    2019-03-19
         * SSL was broken older (pre-2018) versions of mariadb-connector-c
 
