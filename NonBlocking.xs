@@ -18,25 +18,23 @@
 /* newer connector-c releases just have MARIADB_PACKAGE_VERSION_ID which we can use. Yay
  * Otherwise we need to define it. Anti-yay.
  * */
-#ifdef MARIADB_PACKAGE_VERSION_ID
-#  define MARIADB_CLIENT_VERSION_ID MARIADB_PACKAGE_VERSION_ID
-#else
-#  if MARIADB_PACKAGE_VERSION == "3.0.4"
-#    define MARIADB_CLIENT_VERSION_ID 30004
-#  elif MARIADB_PACKAGE_VERSION == "3.0.3"
-#    define MARIADB_CLIENT_VERSION_ID 30003
-#  elif MARIADB_PACKAGE_VERSION == "3.0.2"
-#    define MARIADB_CLIENT_VERSION_ID 30002
-#  elif MARIADB_PACKAGE_VERSION == "3.0.1"
-#    define MARIADB_CLIENT_VERSION_ID 30001
-#  elif MARIADB_PACKAGE_VERSION == "3.0.0"
-#    define MARIADB_CLIENT_VERSION_ID 30000
-# else
-#    define MARIADB_CLIENT_VERSION_ID 20000
+#ifndef MARIADB_PACKAGE_VERSION_ID
+#  if defined SERVER_STATUS_IN_TRANS_READONLY
+#    define MARIADB_PACKAGE_VERSION_ID 30004
+#  elif defined MARIADB_BASE_VERSION
+#    define MARIADB_PACKAGE_VERSION_ID 30003
+#  elif defined TLS_LIBRARY_VERSION
+#    define MARIADB_PACKAGE_VERSION_ID 30002
+#  elif defined MYSQL_CLIENT_reserved22
+#    define MARIADB_PACKAGE_VERSION_ID 30000
 # endif
 #endif
 
-#define HAVE_SSL_ENFORCE ( MARIADB_CLIENT_VERSION_ID >= 30002 )
+#ifdef MARIADB_PACKAGE_VERSION_ID
+#  define HAVE_SSL_ENFORCE ( MARIADB_PACKAGE_VERSION_ID >= 30002 )
+#else
+#  define HAVE_SSL_ENFORCE FALSE
+#endif
 
 typedef struct sql_config {
     /* passed to mysql_real_connect(_start) */
