@@ -5,78 +5,6 @@ sub TELL (@) {
     say STDERR __PACKAGE__, ': ', join " ", @_;
 }
 
-package MariaDB::NonBlocking::Promises::Stolen {
-    BEGIN { $INC{__PACKAGE__ =~ s<::></>gr . '.pm'} = __FILE__ }
-    use Exporter 'import';
-    use Carp qw/croak/;
-    use Ref::Util qw/is_arrayref is_coderef/;
-    use AnyEvent::XSPromises qw/resolved rejected deferred/;
-    use v5.18.2;
-    use warnings;
-    use Sub::StrictDecl;
-    BEGIN { our @EXPORT_OK = 'p_foreach' }
-    sub p_foreach {
-        my ($input_ref, $sub, $concurrency)= @_;
-        $concurrency ||= 1;
-
-        if (!is_arrayref($input_ref) && !is_coderef($input_ref)) {
-            croak('input needs to be an arrayref or coderef');
-        }
-
-        my $deferred= deferred;
-        my $active= 0;       # Number of currently running concurrent "workers"
-        my $continue= 1;     # Has more items
-        my $fail_with_error; # Whether to just bail out and throw an error
-
-        my $next= sub {
-            my $item;
-            if ($continue) {
-                if (is_arrayref($input_ref)) {
-                    $continue= 0+@$input_ref;
-                    $item= shift @$input_ref;
-                } else {
-                    eval {
-                        $item= $input_ref->();
-                        $continue= defined($item);
-                        1;
-                    } or do {
-                        my $error= $@ || "zombie";
-                        $fail_with_error ||= "Input code died: $error";
-                        $continue= 0;
-                    };
-                }
-            }
-            if (!$continue) {
-                $active--;
-                if ($active == 0) {
-                    if ($fail_with_error) {
-                        $deferred->reject($fail_with_error);
-                    } else {
-                        $deferred->resolve;
-                    }
-                }
-                return;
-            }
-            resolved->then(sub {
-                $sub->($item);
-            })->catch(sub {
-                my $error= shift || "zombie promise";
-                $continue= 0;
-                $fail_with_error ||= $error;
-            })->then(__SUB__, __SUB__);
-            return;
-        };
-
-        $active= $concurrency;
-        for (1..$concurrency) {
-            $next->();
-        }
-
-        return $deferred->promise;
-    }
-}
-use MariaDB::NonBlocking::Promises::Stolen 'p_foreach';
-
 use v5.18.2;
 use warnings;
 use Sub::StrictDecl;
@@ -407,8 +335,12 @@ sub _check_and_maybe_extend_pool_size {
 
     my $connecting_here = $needed_connections;
     weaken($pool);
-    return p_foreach([1..$needed_connections], sub {
+    return AnyEvent::XSPromises::collect(
+        map AnyEvent::XSPromises::resolved(1)->then(sub {
         return unless $pool;
+        return unless $needed_connections-- > 0;
+
+        my $start_new_connection = __SUB__;
 
         my $splay = $pool->_get_connect_splay();
         $pool->{_counters}{connections_currently_connecting}++;
@@ -483,12 +415,12 @@ sub _check_and_maybe_extend_pool_size {
         })->finally(sub {
             $connecting_here--;
             $pool->{_counters}{connections_currently_connecting}--;
-        });
-    }, $max_extend)->then(sub {
+        })->then($start_new_connection);
+    }), 1..$max_extend )->then(sub {
         $pool->_start_running_queries_if_needed if $pool;
         return;
     })->catch(sub {
-        # We get here if, somehow, p_foreach or _start_running_queries_if_needed died.
+        # We get here if, somehow, _start_running_queries_if_needed died.
         my $error = $_[0];
         $pool->fail_pending($error) if $pool;
         die $error;
