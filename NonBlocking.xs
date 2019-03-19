@@ -15,6 +15,29 @@
     maria->query_results = MUTABLE_SV(newAV()); \
 } STMT_END
 
+/* newer connector-c releases just have MARIADB_PACKAGE_VERSION_ID which we can use. Yay
+ * Otherwise we need to define it. Anti-yay.
+ * */
+#ifdef MARIADB_PACKAGE_VERSION_ID
+#  define MARIADB_CLIENT_VERSION_ID MARIADB_PACKAGE_VERSION_ID
+#else
+#  if MARIADB_PACKAGE_VERSION == "3.0.4"
+#    define MARIADB_CLIENT_VERSION_ID 30004
+#  elif MARIADB_PACKAGE_VERSION == "3.0.3"
+#    define MARIADB_CLIENT_VERSION_ID 30003
+#  elif MARIADB_PACKAGE_VERSION == "3.0.2"
+#    define MARIADB_CLIENT_VERSION_ID 30002
+#  elif MARIADB_PACKAGE_VERSION == "3.0.1"
+#    define MARIADB_CLIENT_VERSION_ID 30001
+#  elif MARIADB_PACKAGE_VERSION == "3.0.0"
+#    define MARIADB_CLIENT_VERSION_ID 30000
+# else
+#    define MARIADB_CLIENT_VERSION_ID 20000
+# endif
+#endif
+
+#define HAVE_SSL_ENFORCE ( MARIADB_CLIENT_VERSION_ID >= 30002 )
+
 typedef struct sql_config {
     /* passed to mysql_real_connect(_start) */
     const char* username;
@@ -1022,24 +1045,16 @@ THX_unpack_config_from_hashref(pTHX_ SV* self, HV* args)
             ssl_verify = SvTRUE(*svp);
         }
 
-#if defined(MYSQL_OPT_SSL_ENFORCE)
+#if HAVE_SSL_ENFORCE
         if (mysql_options(maria->mysql, MYSQL_OPT_SSL_ENFORCE, &ssl_enforce) != 0) {
             croak("Enforcing SSL encryption is not supported");
         }
-#elif defined(MYSQL_OPT_SSL_VERIFY_SERVER_CERT)
+#else
         /* Try this instead... */
         ssl_verify = 1;
-#else
-        croak("Enforcing SSL encryption is not supported");
 #endif
 
-        if ( ssl_verify &&
-#ifdef MYSQL_OPT_SSL_VERIFY_SERVER_CERT
-            mysql_options(maria->mysql, MYSQL_OPT_SSL_VERIFY_SERVER_CERT, &ssl_verify) != 0
-#else
-            TRUE
-#endif
-        ) {
+        if ( ssl_verify && mysql_options(maria->mysql, MYSQL_OPT_SSL_VERIFY_SERVER_CERT, &ssl_verify) != 0 ) {
             croak("verify_server_cert=1 (or optional=0 in a version without MYSQL_OPT_SSL_ENFORCE) is not supported");
         }
 
