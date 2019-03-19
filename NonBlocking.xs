@@ -64,6 +64,7 @@ typedef struct MariaDB_client {
 
     /* For the state machine */
     bool is_cont;   /* next operation must be a _cont */
+    bool run_query;
     int current_state;
     int last_status;
 
@@ -123,9 +124,10 @@ void
 THX_disconnect_generic(pTHX_ MariaDB_client* maria)
 #define disconnect_generic(maria) THX_disconnect_generic(aTHX_ maria)
 {
-    if ( maria->query_sv ) {
+    if ( maria->run_query ) {
         SvREFCNT_dec(maria->query_sv);
-        maria->query_sv = NULL;
+        maria->query_sv  = NULL;
+        maria->run_query = FALSE;
     }
 
     if ( maria->res ) {
@@ -440,7 +442,7 @@ THX_do_work(pTHX_ SV* self, IV event)
         if ( status )
             break;
 
-        if ( state == STATE_STANDBY && !maria->query_sv )
+        if ( state == STATE_STANDBY && !maria->run_query )
             break;
 
         if ( state == STATE_DISCONNECTED && !have_password_in_memory(maria) ) {
@@ -450,7 +452,7 @@ THX_do_work(pTHX_ SV* self, IV event)
         /*warn("<%d><%s><%d>\n", maria->socket_fd, state_to_name[maria->current_state], maria->is_cont);*/
         switch ( state ) {
             case STATE_STANDBY:
-                if ( maria->query_sv ) {
+                if ( maria->run_query ) {
                     /* we have a query sv saved, so go ahead and run it! */
                     state = STATE_QUERY;
                 }
@@ -464,7 +466,7 @@ THX_do_work(pTHX_ SV* self, IV event)
                     state = STATE_CONNECT;
                 }
                 else {
-                    if ( maria->query_sv ) {
+                    if ( maria->run_query ) {
                         err       = 1;
                         errstring = "Disconnected and no password in memory to reconnect, nothing to do!";
                     }
@@ -560,8 +562,7 @@ THX_do_work(pTHX_ SV* self, IV event)
                     state          = STATE_STANDBY;
 
                     /* Release this */
-                    SvREFCNT_dec(maria->query_sv);
-                    maria->query_sv = NULL;
+                    maria->run_query = NULL;
 
                     errstring = mysql_error(maria->mysql);
                 }
@@ -573,8 +574,7 @@ THX_do_work(pTHX_ SV* self, IV event)
                     maria->is_cont = FALSE; /* hooray! */
 
                     /* finally, release the query string */
-                    SvREFCNT_dec(maria->query_sv);
-                    maria->query_sv = NULL;
+                    maria->run_query = NULL;
 
                     if ( maria->store_query_result ) {
                         state = STATE_STORE_RESULT;
@@ -630,7 +630,7 @@ THX_do_work(pTHX_ SV* self, IV event)
                         if ( !maria->res ) {
                             /* query was successful but returned nothing */
                             /* if mysql_affected_rows(maria->mysql) returns
-                               something interesting, that's our output 
+                               something interesting, that's our output
                              */
                             UV affected_rows = mysql_affected_rows(maria->mysql);
                             if ( affected_rows ) {
@@ -797,9 +797,8 @@ THX_do_work(pTHX_ SV* self, IV event)
         maria->current_state = state_for_error;
         maria->last_status   = 0;
 
-        if ( maria->query_sv ) {
-            SvREFCNT_dec(maria->query_sv);
-            maria->query_sv = NULL;
+        if ( maria->run_query ) {
+            maria->run_query = NULL;
         }
 
         if (!errstring)
@@ -1104,6 +1103,7 @@ CODE:
     maria->socket_fd     = -1;
     maria->thread_id     = -1;
     maria->store_query_result = TRUE;
+    maria->query_sv      = newSVpvs("");
 
     maybe_init_mysql_connection(maria->mysql);
 
@@ -1184,7 +1184,7 @@ CODE:
     else if ( maria->current_state != STATE_STANDBY || maria->is_cont ) {
         croak("Cannot ping an active connection!!"); /* TODO moar info */
     }
-    else if ( maria->query_sv ) {
+    else if ( maria->run_query ) {
         croak("Cannot ping when we have a query queued to be run");
     }
     else {
@@ -1214,7 +1214,7 @@ CODE:
     dMARIA;
 
     /* TODO would be pretty simple to implement a pipeline here... */
-    if ( maria->query_sv )
+    if ( maria->run_query )
         croak("Attempted to start a query when this connection already has a query in flight");
 
     if ( !SvOK(query) )
@@ -1261,7 +1261,7 @@ CODE:
         SV* bind = ST(3);
         AV* bind_av;
         bool escaped;
-        SV* query_with_params;
+        SV* query_with_params = maria->query_sv;
         bool need_utf8_on               = cBOOL(SvUTF8(query));
         STRLEN max_size_of_query_string;
         const char* query_pv            = SvPV(query, max_size_of_query_string);
@@ -1297,10 +1297,13 @@ CODE:
             max_size_of_query_string += sv_len(query_param)*2+1; /* should be +2, but we are replacing a question mark so */
         }
 
-        query_with_params = newSV(max_size_of_query_string);
-        SvPOK_on(query_with_params);
-        if ( need_utf8_on )
+        SvGROW(query_with_params, max_size_of_query_string);
+        if ( need_utf8_on ) {
             SvUTF8_on(query_with_params);
+        }
+        else {
+            SvUTF8_off(query_with_params);
+        }
 
         d = SvPVX(query_with_params);
         i = 0; /* back to the start */
@@ -1373,19 +1376,16 @@ CODE:
         *d++ = '\0'; /* never hurts to have a NUL terminated string */
 
         if ( i != num_bind_params ) {
-            sv_free(query_with_params);
             croak("Too many bind params given for query! Got %"IVdf", query needed %"IVdf, num_bind_params, i);
         }
-
-        maria->query_sv = query_with_params;
-
     }
     else {
         /* we MUST copy this, because mysql_real_query will not -- it will
          * hold on to the pointer until it is done sending the query
          * */
-        maria->query_sv = newSVsv(query);
+        sv_setsv(maria->query_sv, query);
     }
+    maria->run_query = TRUE;
 
     if ( maria->is_cont ) {
         /*
