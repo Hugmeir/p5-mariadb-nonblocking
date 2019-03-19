@@ -32,8 +32,6 @@
 
 #ifdef MARIADB_PACKAGE_VERSION_ID
 #  define HAVE_SSL_ENFORCE ( MARIADB_PACKAGE_VERSION_ID >= 30002 )
-#else
-#  define HAVE_SSL_ENFORCE FALSE
 #endif
 
 typedef struct sql_config {
