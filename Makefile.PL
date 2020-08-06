@@ -26,6 +26,12 @@ GetOptions(
 );
 my $mariadb_path = $opt->{mariadb_path};
 
+sub _run {
+    my @cmd = @_;
+    print "Will run: @cmd\n";
+    system { $cmd[0] } @cmd;
+}
+
 use constant MARIADB_TARBALL_BASENAME => 'mariadb-connector-c-3.1.9-src.tar.gz';
 use constant MARIADB_SRC_BASENAME     => 'mariadb-connector-c-3.1.9-src';
 sub compile_mariadb_connector_c {
@@ -41,13 +47,34 @@ sub compile_mariadb_connector_c {
 
     my $untar_out           = `tar -xf $mariadb_src_tarball -C $deps_dir`;
 
+    my $patches = [
+        {
+            orig_file  => File::Spec->catfile($mariadb_src_dir, 'plugins', 'auth', 'CMakeLists.txt'),
+            patch_file => File::Spec->catfile($deps_dir, 'statically_link_auth_plugins.patch'),
+            explain    => 'authentication plugins are dynamically linked to libmariadbclient, we need them statically linked',
+        }
+    ];
 
     my $cwd = Cwd::cwd();
     {
+        # Apply patches:
+        foreach my $patch ( @$patches ) {
+            my $target_file = $patch->{orig_file};
+            my $patch_file  = $patch->{patch_file};
+            _run( patch => $target_file => $patch_file );
+        }
         chdir $mariadb_src_dir or die "cannot chdir to '$mariadb_src_dir': $!";
-        system { 'cmake' } cmake => qw< -DCMAKE_BUILD_TYPE=RelWithDebInfo -DWITH_SSL=OPENSSL >;
-        system { 'make'  } make  => qw< mariadb_config >;
-        system { 'make'  } make  => qw< mariadbclient  >;
+        my @cmake_args = qw(
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo
+            -DWITH_SSL=OPENSSL
+        );
+
+        # cargo-cult; without this cmake cannot find openssl, but why is it hardcoded to these directories??
+        push @cmake_args, qw<-DOPENSSL_ROOT_DIR=/usr/local/opt/openssl -DOPENSSL_LIBRARIES=/usr/local/opt/openssl/lib>
+            if $^O eq 'darwin';
+        _run(cmake => @cmake_args);
+        _run(make => qw< mariadb_config >);
+        _run(make => qw< mariadbclient  >);
         chdir $cwd;
     }
 
