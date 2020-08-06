@@ -303,5 +303,5 @@ WriteMakefile(
     CCFLAGS   => $ccflags,
     LDDLFLAGS => $lddlflags,
     dist  => { COMPRESS => 'gzip -9f', SUFFIX => 'gz', },
-    clean => { FILES => 'MariaDB-NonBlocking-* t/lib.pl' },
+    clean => { FILES => 'MariaDB-NonBlocking-* t/lib.pl dist/*' },
 );
