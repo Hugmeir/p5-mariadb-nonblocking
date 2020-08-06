@@ -1,5 +1,9 @@
 Revision history for MariaDB-NonBlocking
 
+0.22    2020-08-06
+        * When compiling mariadb-connector-c, statically link against
+          the authentication plugins.
+
 0.21    2020-08-06
         * Bundled mariadb-connector-c source to make compiling this
           less dependent on the environment.
