@@ -1,6 +1,6 @@
 package MariaDB::NonBlocking::Promises::Pool;
 
-use constant DEBUG => $ENV{MariaDB_NonBlocking_DEBUG} // 0;
+use constant DEBUG => $ENV{MariaDB_NonBlocking_DEBUG} // $ENV{DEBUG_ALL} // 0;
 sub TELL (@) {
     say STDERR __PACKAGE__, ': ', join " ", @_;
 }
@@ -334,6 +334,8 @@ sub _check_and_maybe_extend_pool_size {
     # preemptively expand the pool size to prevent overextending
     $pool->{pool_size} += $needed_connections;
 
+    my $pool_name    = $pool->{pool_name};
+
     my $connecting_here = $needed_connections;
     weaken($pool);
     return AnyEvent::XSPromises::collect(
@@ -359,6 +361,7 @@ sub _check_and_maybe_extend_pool_size {
             $pool->{currently_connecting}{$refaddr} = $initial_connection;
 
             my $t0 = time;
+            DEBUG && TELL "Will start connecting to $pool_name";
             return $initial_connection->connect($connection_args)->then(sub {
                 # Success
                 return unless $pool;
@@ -392,22 +395,30 @@ sub _check_and_maybe_extend_pool_size {
 
                 my $confession = $pool->_format_connection_error($error, $connection_args);
 
-                if ( $pool->{pool_size} > 0 || !$pool->pool_has_any_pending ) {
+                if ( $pool->{pool_size} > 0 ) {
+                    DEBUG && TELL "Failed to connect to $pool_name and have other connections, warning and moving on";
                     # Well... One connection failed, but we still have some in the pool,
                     # or we don't have any pending queries, therefore we don't care.
                     # Just toss a warning, in the hope that this is transient.
                     warn $confession;
                     return;
                 }
-
-                # Failed to extend the pool to even 1 connection, and we have
-                # pending queries.  Fail the queries now.
-                my $pool_name    = $pool->{pool_name};
-                my $error_string = "Connection pool for $pool_name is empty and we failed to extend it.  All pending queries will be marked as failed. Error: $confession";
-                # $error_string has the confession AND the stacktrace
-                $pool->fail_pending($error_string);
-                # Don't rethrow, let the actual promises deal with the fallout
-                return;
+                elsif ( $pool->pool_has_any_pending ) {
+                    DEBUG && TELL "Failed to connect to $pool_name and have no other connections, failing all pending";
+                    # Failed to extend the pool to even 1 connection, and we have
+                    # pending queries.  Fail the queries now.
+                    my $error_string = "Connection pool for $pool_name is empty and we failed to extend it.  All pending queries will be marked as failed. Error: $confession";
+                    # $error_string has the confession AND the stacktrace
+                    $pool->fail_pending($error_string);
+                    # Don't rethrow, let the actual promises deal with the fallout
+                    return;
+                }
+                else {
+                    DEBUG && TELL "Failed to connect, but have no pending queries, so just throwing a warning";
+                    # Huh.  Well, the connect failed but we don't have any pending
+                    # connections, so who cares.
+                    warn $confession;
+                }
             })->finally(sub {
                 delete $pool->{currently_connecting}{$refaddr} if $pool;
             });
@@ -416,9 +427,12 @@ sub _check_and_maybe_extend_pool_size {
             $pool->{_counters}{connections_currently_connecting}--;
         })->then($start_new_connection);
     }), 1..$max_extend )->then(sub {
-        $pool->_start_running_queries_if_needed if $pool;
+        DEBUG && TELL "Done connecting to $pool_name, start running queries";
+
+        $pool->_start_running_queries_if_needed if $pool && $pool->pool_has_any_pending;
         return;
     })->catch(sub {
+        DEBUG && TELL "Failed connecting to $pool_name";
         # We get here if, somehow, _start_running_queries_if_needed died.
         my $error = $_[0];
         $pool->fail_pending($error) if $pool;
