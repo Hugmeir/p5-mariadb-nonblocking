@@ -40,6 +40,11 @@ use constant {
     PENDING_SCHEDULED_TIME    => 6,      # hires unix timestamp of when the query was scheduled, for eventlog purposes
 };
 
+use constant {
+    MYSQL_POOL_EXTEND_STRATEGY_MINIMUM_CONNECTIONS => 'min',
+    MYSQL_POOL_EXTEND_STRATEGY_MAXIMUM_CONNECTIONS => 'max',
+};
+
 sub _format_connection_error { # Override
     my ($pool, $error, $connection_args) = @_;
     return $error;
@@ -98,6 +103,7 @@ my %default_settings = (
         # If we need to extend the pool, how many
         # connections do we extend it by in parallel?
         max_extend_at_a_time  => 1, # at most do X connections at once
+        extend_strategy       => MYSQL_POOL_EXTEND_STRATEGY_MAXIMUM_CONNECTIONS,
 
         query_retries         => 2,
     },
@@ -106,6 +112,7 @@ my %default_settings = (
         low_water_mark        => 1,
         max_extend_at_a_time  => 1,
         query_retries         => 1,
+        extend_strategy       => MYSQL_POOL_EXTEND_STRATEGY_MINIMUM_CONNECTIONS,
     },
 );
 
@@ -313,19 +320,36 @@ sub _connector_class { 'MariaDB::NonBlocking::Promises' } # override if desired
 # Removes ghost connections, and extends the pool if needed
 sub _check_and_maybe_extend_pool_size {
     my ($outside_pool) = @_;
-
     my $pool = $outside_pool;
 
-    # Return if pool has more than the low water mark
-    return if $pool->{pool_size} >= $pool->{low_water_mark};
+    # Return if pool already at max size
+    return if $outside_pool->{pool_size} >= $outside_pool->{high_water_mark};
 
-    my $needed_connections = $pool->{high_water_mark} - $pool->{pool_size};
+    my $extend_strategy = $outside_pool->{extend_strategy} ||= MYSQL_POOL_EXTEND_STRATEGY_MINIMUM_CONNECTIONS;
 
-    $needed_connections -= $pool->{_counters}{connections_currently_connecting} || 0;
-    DEBUG && TELL "Going to extend the pool by $needed_connections";
+    # Return if pool has more than the low water mark, and the extend strategy is 'minimum'
+    return if $outside_pool->{pool_size} >= $outside_pool->{low_water_mark}
+            && $extend_strategy eq MYSQL_POOL_EXTEND_STRATEGY_MINIMUM_CONNECTIONS;
+
+    my $needed_connections;
+    if ($extend_strategy eq MYSQL_POOL_EXTEND_STRATEGY_MINIMUM_CONNECTIONS) {
+        $needed_connections = $outside_pool->{low_water_mark} - $outside_pool->{pool_size};
+    } else { # $extend_strategy eq MYSQL_POOL_EXTEND_STRATEGY_MAXIMUM_CONNECTIONS
+        $needed_connections = $outside_pool->{high_water_mark} - $outside_pool->{pool_size};
+    }
+
 
     # Should never happen:
     return if $needed_connections < 1;
+
+    $needed_connections = $outside_pool->{max_extend_at_a_time} || 1
+        if $needed_connections > $outside_pool->{max_extend_at_a_time};
+
+    $needed_connections -= $pool->{_counters}{connections_currently_connecting} || 0;
+
+    # Should never happen:
+    return if $needed_connections < 1;
+    DEBUG && TELL "Going to extend the pool by $needed_connections";
 
     my $max_extend = $pool->{max_extend_at_a_time} || 1;
 
