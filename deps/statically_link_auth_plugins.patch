@@ -10,10 +10,6 @@
 <                     DEFAULT DYNAMIC
 ---
 >                     DEFAULT STATIC
-109c109
-<                   DEFAULT DYNAMIC
----
->                   DEFAULT STATIC
 126c126
 <                 DEFAULT DYNAMIC
 ---
