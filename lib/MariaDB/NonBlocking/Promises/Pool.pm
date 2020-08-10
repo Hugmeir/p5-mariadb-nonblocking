@@ -648,11 +648,14 @@ sub _run_query {
     $attr->{want_hashrefs} = 1 unless exists $attr->{want_hashrefs};
 
     # Force all queries to have timeouts.
-    $attr->{perl_timeout}
-        = ($attr->{timeout}//0) <= 0
-            # Default to slightly higher than the MySQL timeout:
-            ? $outside_pool->{max_execution_time} * 1.2
-            : $attr->{timeout};
+    if ( !defined $attr->{timeout} || $attr->{timeout} < 0 ) {
+        # Default to slightly higher than the MySQL timeout:
+        $attr->{perl_timeout} = $outside_pool->{max_execution_time} * 1.2;
+    }
+    else {
+        # timeout may be zero:
+        $attr->{perl_timeout} = $attr->{timeout};
+    }
 
     my $conn = $outside_conn;
     weaken($conn);
