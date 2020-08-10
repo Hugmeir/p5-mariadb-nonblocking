@@ -515,7 +515,9 @@ sub _add_to_pending_array {
 sub fail_pending {
     my ($pool, $error_string) = @_;
     while ( my $pending = $pool->_get_from_pending() ) {
+        next unless $pending;
         my $deferred       = $pending->[PENDING_DEFERRED];
+        next unless $deferred; # global destruction
         my $stacktrace_ref = $pending->[PENDING_STACKTRACE];
         $deferred->reject($error_string . $$stacktrace_ref)
             if $deferred->is_in_progress;
@@ -560,7 +562,7 @@ Stacktrace:
 EOERROR
 
         $deferred->reject($timeout_message)
-            if $deferred->is_in_progress;
+            if $deferred && $deferred->is_in_progress;
     }
 }
 
@@ -724,7 +726,7 @@ sub _run_query {
         $error = $pool->_format_query_error($query, $error, $conn, $time0, $cpu0);
 
         $deferred->reject($error . ${$pending->[PENDING_STACKTRACE]})
-            if $deferred->is_in_progress; # fail the promise
+            if $deferred && $deferred->is_in_progress; # fail the promise
 
         # TODO so... here we could check if the connection
         # is still viable and add it back into the pool.
@@ -737,7 +739,8 @@ sub _run_query {
         my $e = $_[0];
 
         # TODO: is this double-appending the stacktrace?
-        $deferred->reject( "Error when running query: $e" . ${$pending->[PENDING_STACKTRACE]} ) if $deferred->is_in_progress;
+        $deferred->reject( "Error when running query: $e" . ${$pending->[PENDING_STACKTRACE]} )
+            if $deferred & $deferred->is_in_progress;
 
         $pool->_remove_connection_and_extend( $conn ) if $pool;
     })->finally(sub {
@@ -822,7 +825,7 @@ sub _start_running_queries_if_needed {
             DEBUG && TELL "Failed to run query: $e";
 
             $deferred->reject($e . ${$pending->[PENDING_STACKTRACE]})
-                if $deferred->is_in_progress;
+                if $deferred && $deferred->is_in_progress;
             next PENDING;
         };
         return $p;
