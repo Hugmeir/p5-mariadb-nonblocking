@@ -167,7 +167,7 @@ sub new {
     $database_name //= $schema_name;
     $mode          //= 'ro';
 
-    my $max_execution_time = $new_args->{max_execution_time} || $MYSQL_MAX_EXECUTION_TIME || 4;
+    my $max_execution_time = $new_args->{max_execution_time} // $MYSQL_MAX_EXECUTION_TIME;
 
     my $pool_name  = $schema_name ne $database_name
                    ? join('-', $schema_name, $database_name, $mode)
@@ -529,7 +529,7 @@ sub fail_queries_left_scheduled_for_too_long {
     my $pending_queries = $pool->{pending_queries} // [];
     return unless @$pending_queries;
 
-    my $time_in_seconds_a_query_can_remain_in_the_pool_without_being_run = $pool->{max_execution_time};
+    my $time_in_seconds_a_query_can_remain_in_the_pool_without_being_run = $pool->{max_scheduling_time} // $pool->{max_execution_time} // 4;
     $time_in_seconds_a_query_can_remain_in_the_pool_without_being_run *= 1.5;
 
     my $time      = time;
