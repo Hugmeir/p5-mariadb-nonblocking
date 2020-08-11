@@ -582,8 +582,7 @@ THX_do_work(pTHX_ SV* self, IV event)
                     maria->is_cont = FALSE;
                     state          = STATE_STANDBY;
 
-                    /* Release this */
-                    maria->run_query = NULL;
+                    maria->run_query = FALSE;
 
                     errstring = mysql_error(maria->mysql);
                 }
@@ -595,7 +594,7 @@ THX_do_work(pTHX_ SV* self, IV event)
                     maria->is_cont = FALSE; /* hooray! */
 
                     /* finally, release the query string */
-                    maria->run_query = NULL;
+                    maria->run_query = FALSE;
 
                     if ( maria->store_query_result ) {
                         state = STATE_STORE_RESULT;
@@ -819,7 +818,7 @@ THX_do_work(pTHX_ SV* self, IV event)
         maria->last_status   = 0;
 
         if ( maria->run_query ) {
-            maria->run_query = NULL;
+            maria->run_query = FALSE;
         }
 
         if (!errstring)
@@ -1112,7 +1111,9 @@ CODE:
     maria->socket_fd     = -1;
     maria->thread_id     = -1;
     maria->store_query_result = TRUE;
-    maria->query_sv      = newSVpvs("");
+    maria->query_sv      = newSV(0);
+    SvUPGRADE(maria->query_sv, SVt_PV);
+    SvPOK_on(maria->query_sv);
 
     maybe_init_mysql_connection(maria->mysql);
 
@@ -1260,6 +1261,12 @@ CODE:
         if ( svp && *svp ) {
             maria->want_hashrefs = cBOOL(SvTRUE(*svp));
         }
+    }
+
+    if ( !maria->query_sv ) {
+        maria->query_sv = newSV(0);
+        SvUPGRADE(maria->query_sv, SVt_PV);
+        SvPOK_on(maria->query_sv);
     }
 
     /* TODO implement prepared statements, then check if we have one here */
