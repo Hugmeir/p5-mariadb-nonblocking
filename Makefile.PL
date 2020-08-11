@@ -341,5 +341,9 @@ WriteMakefile(
     CCFLAGS   => $ccflags,
     LDDLFLAGS => $lddlflags,
     dist  => { COMPRESS => 'gzip -9f', SUFFIX => 'gz', },
-    clean => { FILES => 'MariaDB-NonBlocking-* t/lib.pl dist/*' },
+    clean => { FILES => [
+        'MariaDB-NonBlocking-*',
+        't/lib.pl',
+        'deps/mariadb-connector-c-3.1.9-src',
+    ] },
 );
