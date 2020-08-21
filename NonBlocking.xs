@@ -15,21 +15,7 @@
     maria->query_results = MUTABLE_SV(newAV()); \
 } STMT_END
 
-/* newer connector-c releases just have MARIADB_PACKAGE_VERSION_ID which we can use. Yay
- * Otherwise we need to define it. Anti-yay.
- * */
-#ifndef MARIADB_PACKAGE_VERSION_ID
-#  if defined SERVER_STATUS_IN_TRANS_READONLY
-#    define MARIADB_PACKAGE_VERSION_ID 30004
-#  elif defined MARIADB_BASE_VERSION
-#    define MARIADB_PACKAGE_VERSION_ID 30003
-#  elif defined TLS_LIBRARY_VERSION
-#    define MARIADB_PACKAGE_VERSION_ID 30002
-#  elif defined MYSQL_CLIENT_reserved22
-#    define MARIADB_PACKAGE_VERSION_ID 30000
-# endif
-#endif
-
+/* newer connector-c releases just have MARIADB_PACKAGE_VERSION_ID which we can use. Yay */
 #ifdef MARIADB_PACKAGE_VERSION_ID
 #  if MARIADB_PACKAGE_VERSION_ID >= 30002
 #    define HAVE_SSL_ENFORCE
@@ -1624,4 +1610,10 @@ disconnect(SV* self)
 CODE:
     dMARIA;
     disconnect_generic(maria);
+
+const char*
+mariadb_connector_version()
+CODE:
+RETVAL = MARIADB_PACKAGE_VERSION;
+OUTPUT: RETVAL
 
