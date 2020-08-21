@@ -1309,6 +1309,9 @@ CODE:
             max_size_of_query_string += sv_len(query_param)*2+1; /* should be +2, but we are replacing a question mark so */
         }
 
+        /* Extra four bytes our of paranoia */
+        max_size_of_query_string += 4;
+
         SvGROW(query_with_params, max_size_of_query_string);
         if ( need_utf8_on ) {
             SvUTF8_on(query_with_params);
