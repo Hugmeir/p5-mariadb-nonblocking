@@ -1291,13 +1291,16 @@ CODE:
 
         IV i = 0;
         for ( ; i < num_bind_params; i++ ) {
-            SV* query_param = *av_fetch(bind_av, i, FALSE);
+            SV** query_param_svp = av_fetch(bind_av, i, FALSE);
+            SV* query_param;
 
-            if ( !SvOK(query_param) ) {
+            if ( !query_param_svp || !*query_param_svp || !SvOK(*query_param_svp) ) {
                 /* will add a NULL, so +4 */
                 max_size_of_query_string += 4;
                 continue;
             }
+
+            query_param = *query_param_svp;
 
             if ( SvGMAGICAL(query_param) ) /* get GET magic */
                 mg_get(query_param);
@@ -1328,6 +1331,7 @@ CODE:
                 UV new_length = 0;
                 STRLEN to_be_quoted_len;
                 const char* to_be_quoted_pv;
+                SV** to_be_quoted_svp;
                 SV *to_be_quoted;
                 bool upgraded = FALSE;
 
@@ -1336,15 +1340,16 @@ CODE:
                 if ( i >= num_bind_params )
                     croak("Not enough bind params given to run_query");
 
-                to_be_quoted = *av_fetch(bind_av, i++, FALSE);
+                to_be_quoted_svp = av_fetch(bind_av, i++, FALSE);
 
-                if ( !SvOK(to_be_quoted) ) {
+                if ( !to_be_quoted_svp || !*to_be_quoted_svp || !SvOK(*to_be_quoted_svp) ) {
                     *d++ = 'N';
                     *d++ = 'U';
                     *d++ = 'L';
                     *d++ = 'L';
                     continue;
                 }
+                to_be_quoted = *to_be_quoted_svp;
 
                 if ( need_utf8_on && !SvUTF8(to_be_quoted) ) {
                     /* temporarily upgrade to utf8 -- we will downgrade later */
