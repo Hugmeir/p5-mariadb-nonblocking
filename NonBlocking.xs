@@ -131,12 +131,6 @@ void
 THX_disconnect_generic(pTHX_ MariaDB_client* maria)
 #define disconnect_generic(maria) THX_disconnect_generic(aTHX_ maria)
 {
-    if ( maria->run_query ) {
-        SvREFCNT_dec(maria->query_sv);
-        maria->query_sv  = NULL;
-        maria->run_query = FALSE;
-    }
-
     if ( maria->res ) {
         /* do a best attempt... */
         int status = mysql_free_result_start(maria->res);
@@ -151,6 +145,14 @@ THX_disconnect_generic(pTHX_ MariaDB_client* maria)
         mysql_close(maria->mysql);
         Safefree(maria->mysql);
         maria->mysql = NULL;
+    }
+
+    if ( maria->run_query ) {
+        if ( maria->query_sv ) {
+            SvREFCNT_dec(maria->query_sv);
+            maria->query_sv  = NULL;
+        }
+        maria->run_query = FALSE;
     }
 
     maria->is_cont       = FALSE;
