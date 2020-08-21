@@ -828,6 +828,7 @@ THX_quote_sv(pTHX_ MariaDB_client* maria, SV* to_be_quoted)
     STRLEN new_len_needed;
     STRLEN to_be_quoted_len;
     char * escaped_buffer;
+    char * escaped_buffer_end;
     const char* to_be_quoted_pv;
     SV *quoted_sv;
 
@@ -850,10 +851,16 @@ THX_quote_sv(pTHX_ MariaDB_client* maria, SV* to_be_quoted)
     new_len_needed = to_be_quoted_len * 2 + 3;
 
     quoted_sv      = newSV(new_len_needed);
-    escaped_buffer = SvPVX_mutable(quoted_sv);
-    escaped_buffer[0] = '\'';
-
+    SvUPGRADE(quoted_sv, SVt_PV);
     SvPOK_on(quoted_sv);
+
+    escaped_buffer     = SvPVX_mutable(quoted_sv);
+    escaped_buffer_end = escaped_buffer + new_len_needed;
+    escaped_buffer[0]  = '\'';
+
+    if( escaped_buffer > escaped_buffer_end ) {
+        croak("MariaDB::NonBlocking ASSERT FAILURE: quote() is writing past the end of the buffer: %u %u", escaped_buffer, escaped_buffer_end);
+    }
 
     new_length = mysql_real_escape_string(
         maria->mysql,
@@ -1269,7 +1276,8 @@ CODE:
         bool need_utf8_on               = cBOOL(SvUTF8(query));
         STRLEN max_size_of_query_string;
         const char* query_pv            = SvPV(query, max_size_of_query_string);
-        char *d = NULL;
+        char *d   = NULL;
+        char *end = NULL;
         IV num_bind_params;
 
         if ( max_size_of_query_string == 0 )
@@ -1309,7 +1317,8 @@ CODE:
             SvUTF8_off(query_with_params);
         }
 
-        d = SvPVX(query_with_params);
+        d   = SvPVX(query_with_params);
+        end = d + max_size_of_query_string;
         i = 0; /* back to the start */
         while ( *query_pv ) {
             if ( *query_pv == '?' && !escaped ) {
@@ -1378,6 +1387,10 @@ CODE:
         );
 
         *d++ = '\0'; /* never hurts to have a NUL terminated string */
+
+        if( d > end ) {
+            croak("MariaDB::NonBlocking ASSERT FAILURE: query with placeholders is writing past the end of the buffer: %u %u", d, end);
+        }
 
         if ( i != num_bind_params ) {
             croak("Too many bind params given for query! Got %"IVdf", query needed %"IVdf, num_bind_params, i);
@@ -1495,6 +1508,7 @@ CODE:
     STRLEN retval_actual_len = 0;
     STRLEN max_retval_len    = 0;
     char *d        = NULL; /* dESTINATION */
+    char *end      = NULL;
     IV i           = 0;
     IV items_start = 1; /* 0 is $self */
     IV items_end   = items;
@@ -1553,6 +1567,7 @@ CODE:
         SvUTF8_on(RETVAL);
 
     d = SvPVX(RETVAL);
+    end = d + max_retval_len;
 
     for ( i = items_start; i < items_end; i++ ) {
         SV *identifier = ST(i);
@@ -1603,6 +1618,9 @@ CODE:
         retval_actual_len += 2;
     }
     *d++ = '\0';
+    if( d > end ) {
+        croak("MariaDB::NonBlocking ASSERT FAILURE: quote_identifier() is writing past the end of the buffer: %u %u", d, end);
+    }
     SvCUR_set(RETVAL, (STRLEN)retval_actual_len);
 }
 OUTPUT: RETVAL
