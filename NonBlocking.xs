@@ -859,7 +859,7 @@ THX_quote_sv(pTHX_ MariaDB_client* maria, SV* to_be_quoted)
     escaped_buffer[0]  = '\'';
 
     if( escaped_buffer > escaped_buffer_end ) {
-        croak("MariaDB::NonBlocking ASSERT FAILURE: quote() is writing past the end of the buffer: %u %u", escaped_buffer, escaped_buffer_end);
+        croak("MariaDB::NonBlocking ASSERT FAILURE: quote() is writing past the end of the buffer: %p %p", (void*)escaped_buffer, (void*)escaped_buffer_end);
     }
 
     new_length = mysql_real_escape_string(
@@ -1397,7 +1397,7 @@ CODE:
         *d++ = '\0'; /* never hurts to have a NUL terminated string */
 
         if( d > end ) {
-            croak("MariaDB::NonBlocking ASSERT FAILURE: query with placeholders is writing past the end of the buffer: %u %u", d, end);
+            croak("MariaDB::NonBlocking ASSERT FAILURE: query with placeholders is writing past the end of the buffer: %p %p", (void*)d, (void*)end);
         }
 
         if ( i != num_bind_params ) {
@@ -1627,7 +1627,7 @@ CODE:
     }
     *d++ = '\0';
     if( d > end ) {
-        croak("MariaDB::NonBlocking ASSERT FAILURE: quote_identifier() is writing past the end of the buffer: %u %u", d, end);
+        croak("MariaDB::NonBlocking ASSERT FAILURE: quote_identifier() is writing past the end of the buffer: %p %p", (void*)d, (void*)end);
     }
     SvCUR_set(RETVAL, (STRLEN)retval_actual_len);
 }
