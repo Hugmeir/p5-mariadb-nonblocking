@@ -264,7 +264,7 @@ sub DESTROY {
     my $pending_num = 0;
     if ( my $reject_cb = delete $self->{pending} ) {
         $pending_num++;
-        $reject_cb->("Connection object went away");
+        $reject_cb->("Connection object released before pending query was finished");
     }
     DEBUG && $pending_num && TELL "Had $pending_num operations still running when we were freed";
 }
