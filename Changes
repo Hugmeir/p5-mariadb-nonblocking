@@ -1,5 +1,9 @@
 Revision history for MariaDB-NonBlocking
 
+0.29    2020-11-30
+        * Support systems that provide libmariadb.so but no
+          libmariadbclient.a (e.g. alpine's apk)
+
 0.28    2020-11-30
         * Better support for some default linker flags;
         --as-needed and -z=now break libmariadbclient's
