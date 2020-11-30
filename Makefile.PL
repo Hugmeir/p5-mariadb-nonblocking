@@ -75,18 +75,38 @@ my ($libs, $cflags);
 if ( $opt->{static_link_to_mariadbclient} ) {
     $libs   = Alien::libmariadbclient->libs_static   || Alien::libmariadbclient->libs;
     $cflags = Alien::libmariadbclient->cflags_static || Alien::libmariadbclient->cflags;
+    $libs =~ s/\B-lmariadb\b/-lmariadbclient/g; # static library has a different name!
 }
 else {
     $libs   = Alien::libmariadbclient->libs;
     $cflags = Alien::libmariadbclient->cflags;
 }
 
+# Work around a cmake/OSX bug; -lz gets transformed into
+#   -l/path/to/libz.tbd
+# on systems that have Apple's "built-in dynamic linker cache";
+# so transform it into just a full path.
+$libs =~ s<\B-l/></>g;
+
 my $makemaker_libs = [];
 my $makemaker_inc  = '';
 
+
+
+my $static_libmariadb;
 foreach my $maybe_lib ( shellwords($libs) ) {
-    next unless $maybe_lib =~ m/\B-l(\S+)/;
-    push @$makemaker_libs, $maybe_lib;
+    if ( $maybe_lib =~ m/\B-l(\S+)/ ) {
+        # -lfoo
+        push @$makemaker_libs, $maybe_lib;
+    }
+    elsif ( $maybe_lib =~ m<-L(\S+)> ) {
+        my $lib_dir = $1;
+        # /path/to/libs
+        # add '-Wl,-rpath=$dir'
+        $libs = '-Wl,-rpath,' . $lib_dir . ' ' . $libs;
+        my $libmariadb = File::Spec->catfile($lib_dir, 'libmariadbclient' . $Config{lib_ext});
+        $libs .= ' ' .$libmariadb if -e $libmariadb;
+    }
 }
 $lddlflags .= ' ' . $libs;
 
