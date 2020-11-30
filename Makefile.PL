@@ -11,6 +11,7 @@ use IPC::Cmd     qw/can_run run/;
 use Getopt::Long qw/GetOptions/;
 use File::Basename qw//;
 use File::Path qw//;
+use Alien::libmariadbclient;
 
 my $opt = {};
 GetOptions(
@@ -32,66 +33,6 @@ sub _run {
     system { $cmd[0] } @cmd;
 }
 
-use constant MARIADB_TARBALL_BASENAME => 'mariadb-connector-c-3.1.9-src.tar.gz';
-use constant MARIADB_SRC_BASENAME     => 'mariadb-connector-c-3.1.9-src';
-sub compile_mariadb_connector_c {
-    my $our_src_root = $Bin;
-    my $deps_dir     = File::Spec->catdir($our_src_root, 'deps');
-
-    my $mariadb_src_tarball = File::Spec->catfile($deps_dir, MARIADB_TARBALL_BASENAME);
-    my $mariadb_src_dir     = File::Spec->catdir($deps_dir, MARIADB_SRC_BASENAME);
-
-    return $mariadb_src_dir if -x File::Spec->catfile($mariadb_src_dir, 'mariadb_config');
-
-    File::Path::remove_tree($mariadb_src_dir);
-
-    my $untar_out           = `tar -xf $mariadb_src_tarball -C $deps_dir`;
-
-    my $patches = [
-        {
-            orig_file  => File::Spec->catfile($mariadb_src_dir, 'plugins', 'auth', 'CMakeLists.txt'),
-            patch_file => File::Spec->catfile($deps_dir, 'statically_link_auth_plugins.patch'),
-            explain    => 'authentication plugins are dynamically linked to libmariadbclient, we need them statically linked',
-        }
-    ];
-
-    my $cwd = Cwd::cwd();
-    {
-        # Apply patches:
-        foreach my $patch ( @$patches ) {
-            my $target_file = $patch->{orig_file};
-            my $patch_file  = $patch->{patch_file};
-            _run( patch => $target_file => $patch_file );
-        }
-        chdir $mariadb_src_dir or die "cannot chdir to '$mariadb_src_dir': $!";
-        my @cmake_args = qw(
-            -DCMAKE_BUILD_TYPE=RelWithDebInfo
-            -DWITH_SSL=OPENSSL
-        );
-
-        # cargo-cult; without this cmake in OSX cannot find openssl, but why is it hardcoded to these directories??
-        push @cmake_args,
-            qw<
-                -DOPENSSL_ROOT_DIR=/usr/local/opt/openssl
-                -DOPENSSL_LIBRARIES=/usr/local/opt/openssl/lib
-            >
-            if $^O eq 'darwin';
-
-        # Internal zlib ends up causing memory corruption due to
-        # certain "internal" zlib symbols being in the global namespace,
-        # causing silent clashes with the system zlib library.
-        push @cmake_args, qw<
-            -DWITH_EXTERNAL_ZLIB=yes
-        >;
-        _run(cmake => @cmake_args);
-        _run(make => qw< mariadb_config >);
-        _run(make => qw< mariadbclient  >);
-        chdir $cwd;
-    }
-
-    return $mariadb_src_dir;
-}
-
 my $INSTALL_BASE;
 foreach my $arg ( grep defined, @ARGV, $ENV{PERL_MM_OPT} ) {
     next unless $arg =~ /\bINSTALL_BASE=((?:\S+|\s(?!\S+=))+)\b/sm;
@@ -99,8 +40,10 @@ foreach my $arg ( grep defined, @ARGV, $ENV{PERL_MM_OPT} ) {
     last;
 }
 
-$mariadb_path ||= compile_mariadb_connector_c();
-local $ENV{PATH} .= ':' . $mariadb_path if $mariadb_path; # TODO: pathsep
+$mariadb_path ||= do {
+    require Alien::libmariadbclient;
+    Alien::libmariadbclient->dist_dir;
+};
 
 sub write_config_for_tests {
     my $opt = $_[0];
@@ -217,10 +160,10 @@ sub find_file_in {
         );
 
         for my $path (@try_in) {
-	        my $full_path = File::Spec->catfile($path, $file);
-	        if (-f $full_path) {
-	            return $path;
-	        }
+            my $full_path = File::Spec->catfile($path, $file);
+            if (-f $full_path) {
+                return $path;
+            }
         }
     }
 
@@ -242,7 +185,7 @@ sub run_grab_output {
 
 write_config_for_tests($opt);
 
-my @wanted_libs = qw( ssl crypto iconv  );
+my @wanted_libs = qw( z ssl crypto iconv  );
 
 my ($libs, $inc, $ccflags, $lddlflags) = map $_//'',@Config{qw/libs inc ccflags lddlflags/};
 
@@ -328,6 +271,7 @@ WriteMakefile(
     MIN_PERL_VERSION => '5.006',
     CONFIGURE_REQUIRES => {
         'ExtUtils::MakeMaker' => '0',
+        'Alien::libmariadbclient' => '0.01',
     },
     BUILD_REQUIRES => {
         'Test::More' => '0',
