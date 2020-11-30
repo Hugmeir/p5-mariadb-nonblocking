@@ -65,11 +65,22 @@ EOPERL
     close $fh || die "Failed to create $test_lib: $!";
 }
 
+sub prepare_lddlflags {
+    my ($lddlflags) = @_;
+    # `-Wl,-z,now` breaks static linking to libmariadbclient.a, and
+    # the perl you get from pacman in ArchLinux has that by default
+    # in lddlflags.
+    $lddlflags =~ s<\Q-Wl,-z[,= ]now\E><>g;
+    $lddlflags =~ s<,-z[,= ]now><>g;
+    return $lddlflags;
+}
+
 write_config_for_tests($opt);
 
 $opt->{static_link_to_mariadbclient} //= 1;
 
-my ($ccflags, $lddlflags) = map $_//'', @Config{qw/ccflags lddlflags/};
+my $ccflags   = $Config{ccflags} // '';
+my $lddlflags = prepare_lddlflags($Config{lddlflags} // '');
 
 my ($libs, $cflags);
 if ( $opt->{static_link_to_mariadbclient} ) {
@@ -91,9 +102,9 @@ $libs =~ s<\B-l/></>g;
 my $makemaker_libs = [];
 my $makemaker_inc  = '';
 
-
-
-my $static_libmariadb;
+my @archive_after;
+my $lib_ext = $Config{lib_ext};
+my $found_libmariadbclient_a = 0;
 foreach my $maybe_lib ( shellwords($libs) ) {
     if ( $maybe_lib =~ m/\B-l(\S+)/ ) {
         # -lfoo
@@ -104,8 +115,19 @@ foreach my $maybe_lib ( shellwords($libs) ) {
         # /path/to/libs
         # add '-Wl,-rpath=$dir'
         $libs = '-Wl,-rpath,' . $lib_dir . ' ' . $libs;
-        my $libmariadb = File::Spec->catfile($lib_dir, 'libmariadbclient' . $Config{lib_ext});
-        $libs .= ' ' .$libmariadb if -e $libmariadb;
+        if ( $opt->{static_link_to_mariadbclient} && !$found_libmariadbclient_a ) {
+            # if we are statically linking, don't leave it up to the linker to
+            # use the libmariadbclient.a file -- explicitly pass it:
+            my $libmariadb = File::Spec->catfile($lib_dir, 'libmariadbclient' . $lib_ext);
+            if ( -e $libmariadb ) {
+                $found_libmariadbclient_a = 1;
+                push @archive_after, $libmariadb;
+            }
+        }
+    }
+    elsif ( $maybe_lib =~ m<^/.+$lib_ext$> ) {
+        # .a file in pkg-config --libs output -- this needs to come after the -o
+        push @archive_after, $maybe_lib;
     }
 }
 $lddlflags .= ' ' . $libs;
@@ -140,6 +162,7 @@ WriteMakefile(
     INC     => $makemaker_inc,
     CCFLAGS   => $ccflags,
     LDDLFLAGS => $lddlflags,
+    PERL_ARCHIVE_AFTER => join(' ', @archive_after),
     dist  => { COMPRESS => 'gzip -9f', SUFFIX => 'gz', },
     clean => { FILES => [
         'MariaDB-NonBlocking-*',
