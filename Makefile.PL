@@ -87,7 +87,6 @@ my ($libs, $cflags);
 if ( $opt->{static_link_to_mariadbclient} ) {
     $libs   = Alien::libmariadbclient->libs_static   || Alien::libmariadbclient->libs;
     $cflags = Alien::libmariadbclient->cflags_static || Alien::libmariadbclient->cflags;
-    $libs =~ s/\B-lmariadb\b/-lmariadbclient/g; # static library has a different name!
 }
 else {
     $libs   = Alien::libmariadbclient->libs;
@@ -132,6 +131,11 @@ foreach my $maybe_lib ( shellwords($libs) ) {
     }
 }
 $lddlflags .= ' ' . $libs;
+
+if ($found_libmariadbclient_a) {
+    $_ =~ s/\B-lmariadb\b/-lmariadbclient/g
+        for $lddlflags, @$makemaker_libs; # static library has a different name!
+}
 
 foreach my $maybe_inc ( shellwords($cflags) ) {
     next unless $maybe_inc =~ m/\B-I(\S+)/;
