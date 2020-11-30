@@ -70,8 +70,9 @@ sub prepare_lddlflags {
     # `-Wl,-z,now` breaks static linking to libmariadbclient.a, and
     # the perl you get from pacman in ArchLinux has that by default
     # in lddlflags.
-    $lddlflags =~ s<\Q-Wl,-z[,= ]now\E><>g;
     $lddlflags =~ s<,-z[,= ]now><>g;
+    $lddlflags =~ s<,--as-needed\b><>g;
+    $lddlflags =~ s<-Wl\s>< >g; # did we remove every linker option?
     return $lddlflags;
 }
 
@@ -155,8 +156,10 @@ WriteMakefile(
         'Test::More' => '0',
     },
     PREREQ_PM => {
-        #'ABC'              => '1.6',
-        #'Foo::Bar::Module' => '5.0401',
+        'AnyEvent'             => '0',
+        'Ref::Util'            => '0',
+        'Sub::StrictDecl'      => '0',
+        'AnyEvent::XSPromises' => '0',
     },
     LIBS    => $makemaker_libs,
     INC     => $makemaker_inc,
